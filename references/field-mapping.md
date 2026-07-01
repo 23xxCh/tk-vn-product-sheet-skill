@@ -1,0 +1,57 @@
+# Field Mapping — `tiktok_chanpin_` sheet
+
+Full column map (row 1 headers) and per-field treatment for the Vietnam pipeline.
+
+| Col | Header | Direction | Rule |
+|-----|--------|-----------|------|
+| A | 分类id | keep | unchanged |
+| B | 产品标题 | translate | → Vietnamese ≤80 chars; drop 原装/原厂; de-brand; IP-safe |
+| C | Tiktok产品描述 | rewrite | `<img src=…>` HTML; drop promo/after-sales imgs; swap cleaned URLs |
+| D | 品牌 | set | `Generic N/A` |
+| E | 产品属性 | keep | already Vietnamese JSON; leave as-is |
+| F | sku | set | `YYYYMMDD` + 5-digit sequence (e.g. `2026070100001`) |
+| G | 变种属性名称一 | translate | de-brand → Vietnamese (`颜色分类`→`Phân loại màu`) |
+| H | 变种属性值一 | translate | de-brand → Vietnamese |
+| I | 变种属性名称二 | translate | de-brand → Vietnamese |
+| J | 变种属性值二 | translate | de-brand → Vietnamese |
+| K | 变种属性名称三 | translate | de-brand → Vietnamese |
+| L | 变种属性值三 | translate | de-brand → Vietnamese |
+| M | 识别码类型 | keep | — |
+| N | 识别码 | keep | — |
+| O | 价格(站点币种) | keep | — |
+| P | 本地展示价 | keep | — |
+| Q | 库存 | set | `30` |
+| R | 主图(url)地址 | clean | normalize; regen if brand/logo/watermark/text |
+| S–Z | 附图一~八 | clean | same as 主图 |
+| AA | 视频连接 | clear | empty |
+| AB | 尺码图 | keep | — |
+| AC | 变种主题1图片 | clean | normalize; regen if needed |
+| AD | 重量(kg) | extract | from image text, unit-converted to kg |
+| AE | 长 | extract | from image text |
+| AF | 宽 | extract | from image text |
+| AG | 高 | extract | from image text |
+| AH–AS | 仓库/货到付款/来源/备注/店铺/sku ID/产品id/全球id/店铺币种/时间 | keep | unchanged |
+
+## Image source columns
+
+- `main` → R (主图)
+- `sub` → S,T,U,V,W,X,Y,Z (附图一~八)
+- `variant` → AC (变种主题1图片)
+- `desc` → URLs parsed out of C's `<img>` tags
+
+## Unit conversion (weight → kg)
+
+| Source unit | Conversion |
+|-------------|-----------|
+| g (gram) | ÷1000 |
+| kg | as-is |
+| lb (pound) | ×0.4536 |
+| oz (ounce) | ×0.0283 |
+| jin (斤) | ×0.5 |
+
+Result rounded to 3 decimals. If no weight found, leave AD empty.
+
+## Dimensions (AE/AF/AG)
+
+Default unit cm. Extract the numeric value only. If only one combined
+"长x宽x高" string is shown, split into l/w/h. If none, leave empty.

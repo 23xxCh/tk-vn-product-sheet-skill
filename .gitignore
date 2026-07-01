@@ -1,0 +1,17 @@
+# Secrets
+.env
+assets/agnes_key.txt
+assets/*.key
+assets/*.txt
+
+# Temp
+*.bak
+work.json
+__pycache__/
+outputs/
+/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
