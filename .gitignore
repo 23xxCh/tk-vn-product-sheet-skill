@@ -20,3 +20,6 @@ outputs/
 tk_input/
 tk_output/
 tk_done/
+
+# 本地需求记录,不推送
+CLAUDE.md
