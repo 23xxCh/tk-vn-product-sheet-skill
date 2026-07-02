@@ -17,7 +17,7 @@ metadata:
   created: 2026-07-01
   last_reviewed: 2026-07-01
   review_interval_days: 90
-  repository: https://github.com/<user>/tk-vn-product-sheet-skill
+  repository: https://github.com/23xxCh/tk-vn-product-sheet-skill
   os_family: cross-platform
   provenance:
     - source: https://github.com/mageia/skills-hub/skills/waninter-creative
@@ -64,72 +64,15 @@ python scripts/run_pipeline.py finalize "0630-tk.xlsx" work.json "0630-tk.xlsx"
 ## Architecture
 
 ```
-┌─ xlsx ───────────────────────────────────────────────────┐
-│ 94 rows, 45 cols (A-AS): 标题/品牌/库存/SKU/主图/附图/变种图 │
-└──────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─ Step 1: run_pipeline.py prepare ────────────────────────┐
-│  Deterministic transforms:                                │
-│  • 品牌D → Generic N/A                                    │
-│  • 库存Q → 30                                             │
-│  • 视频AA → cleared                                       │
-│  • SKU F → YYYYMMDD + 5-digit seq                        │
-│  • 图片URL → https:// normalize                           │
-│  • Output: work.json (deduplicated image inventory)       │
-└──────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─ Step 2: Agent translates (fills work.json) ─────────────┐
-│  • 标题B → Vietnamese, ≤80 chars, de-brand                │
-│  • 变种名GIK → Vietnamese (Phân loại màu, v.v.)          │
-│  • 变种值HJL → de-brand + Vietnamese                      │
-└──────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─ Step 3: Vision pre-screen (classify images by URL) ─┐
-│  For each unique image URL, ask a vision LLM:          │
-│  "この画像にブランド名/ロゴ/透かし/中国語テキストがありますか?"│
-│  → clean: keep (no processing needed)                 │
-│  → brand: needs brand/logo/watermark removal           │
-│  → text: has Chinese text → translate to Vietnamese    │
-│  → promo: after-sales/promo banner → delete            │
-│                                                        │
-│  Vision API: POST agnes-2.0-flash /v1/chat/completions │
-│  Input: image URL (no local download)                  │
-│  Output: classification JSON                           │
-└──────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─ Step 4: Batch image generation ─────────────────────────┐
-│  Only process images classified as brand/text.            │
-│  Parallel batches (5-10 concurrent requests):             │
-│                                                        │
-│  Primary: Doubao Seedream 5.0 (2K)                      │
-│  POST https://ark.cn-beijing.volces.com/api/v3/...       │
-│  { "model":"doubao-seedream-5-0-260128",                 │
-│    "prompt":"Remove brand names, logos and watermarks    │
-│              from the image, and translate all text      │
-│              to Vietnamese.",                            │
-│    "image":"<ORIGINAL_URL>",                             │
-│    "response_format":"url", "size":"2K" }               │
-│  → returns hosted URL (24hr TOS signed)                  │
-│                                                        │
-│  Fallback: GPT-Image-2 (1K)                              │
-│  POST https://www.hfsyapi.cn/v1/images/generations       │
-│  → returns OSS hosted URL (24hr)                         │
-└──────────────────────────────────────────────────────────┘
-                          │
-                          ▼
-┌─ Step 5: run_pipeline.py finalize ──────────────────────┐
-│  Write all results back to xlsx:                        │
-│  • Translations (title, variants)                       │
-│  • Cleaned image URLs (main/sub → all variant rows)    │
-│  • Variant image URLs (each row individually)           │
-│  • Rewritten description HTML (cleaned URLs swapped)   │
-│  • Extracted weight/dimensions (if vision found them)  │
-│  • Backs up original → .xlsx.bak                        │
-└──────────────────────────────────────────────────────────┘
+xlsx (94 rows, 45 cols)
+  │
+  ├─ Step 1: prepare      → 品牌/库存/SKU/视频 deterministic + dedup image inventory
+  ├─ Step 2: translate    → 标题/变种 → Vietnamese (de-brand)
+  ├─ Step 3: vision audit  → classify each image: keep/regen/delete (by URL, no download)
+  ├─ Step 4: image gen     → nano-banana-2(4K) → Doubao(2K) → GPT-Image-2(1K) fallback chain
+  ├─ Step 5-6: extract wt/dims + share URLs across variant rows
+  ├─ Step 7-8: align 35-col template + finalize (backup .bak)
+  └─ Step 9: empty value check
 ```
 
 ---
@@ -139,15 +82,20 @@ python scripts/run_pipeline.py finalize "0630-tk.xlsx" work.json "0630-tk.xlsx"
 Create an `.env` file in the skill directory (or export as env vars):
 
 ```bash
-# Primary: Doubao Seedream 5.0 (2K, best quality, 图生图)
-ARK_API_KEY="your_ark_api_key"
-
-# Fallback: GPT-Image-2 via hfsyapi (1K, when Doubao fails)
+# Primary + Fallback2: nano-banana-2 (4K) & GPT-Image-2 (1K) — both via hfsyapi
 HFSY_API_KEY="your_hfsyapi_key"
 
-# Vision pre-screening: Agnes 2.0 flash (classifies images by URL)
+# Fallback1: Doubao Seedream 5.0 (2K, 火山引擎)
+ARK_API_KEY="your_ark_api_key"
+
+# Vision audit: Agnes 2.0 flash (classifies images by URL)
 AGNES_API_KEY="your_agnes_api_key"
 ```
+
+**Image model priority:**
+1. **nano-banana-2** (hfsyapi) — 4K, up to 7 reference images, sharpest
+2. **Doubao Seedream 5.0** (Ark) — 2K fallback
+3. **GPT-Image-2** (hfsyapi) — 1K fallback
 
 > **Open source note**: API keys are user-specific. The `.env` file is
 > `.gitignore`d. Users must provide their own keys for the APIs they choose.
@@ -180,56 +128,96 @@ Edit `work.json` manually or via script. For each row, set:
 }
 ```
 
-Rules:
-- **Title (B)**: Chinese → Vietnamese, ≤80 chars, remove 原装/原厂
-- **Brand words**: rewrite as `phù hợp với [thương hiệu] [mẫu mã]` (compatible with)
-- **Variant names**: `颜色分类→Phân loại màu`, `商品规格→Quy cách sản phẩm`
-- **Variant values**: de-brand + translate to Vietnamese
+Rules (see `references/vietnamese-style.md` for full formula, category-word
+table, and IP-infringement red-lines):
+- **Title (B)** — 黄金公式: `[品类名词] + [核心卖点] + [适用/规格] + [通用词]`
+  - 品类名词开头（越南人名词先搜），≤80 字符
+  - 意译不直译，用越南本地实搜词（不是字典直译）
+  - 删除 `原装`/`原厂`/`正品`/`专柜`/`官方`
+  - 品牌词改「适用于」句式: `[品类] phù hợp với [品牌] [型号]`
+  - 越南语音调符号必须正确（`ô tô` 不是 `o to`）
+- **Variant names (G/I/K)**: `颜色分类→Phân loại màu`, `商品规格→Quy cách sản phẩm`
+- **Variant values (H/J/L)**: de-brand + translate, 精简营销废话
 
-### Step 3 — Vision pre-screening (classify images WITHOUT downloading)
+**IP 红线**（TikTok VN 会下架/封店）: 品牌名当商品主体、`正品/高仿/1:1/原单`、
+未授权 logo、绝对化用语（`最好/第一`）、联系方式外链。全部见 vietnamese-style.md。
 
-For each unique image URL in `work.json`, classify it by sending the URL
-directly to a vision LLM. No local downloads needed.
+### Step 3 — Vision audit + classification (REQUIRED, don't skip)
 
-**Using Agnes 2.0 flash (vision LLM):**
+**Audit EVERY unique image URL with a vision LLM before processing.** This is
+critical — missing a brand/logo/watermark = IP infringement risk.
 
 ```bash
+# Audit each image via Agnes 2.0 flash (vision LLM, reads URL directly)
 curl -X POST "https://apihub.agnes-ai.com/v1/chat/completions" \
   -H "Authorization: Bearer $AGNES_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "agnes-2.0-flash",
     "messages": [
-      {"role": "system", "content": "Classify this product image. Output one word only: clean / brand / text / promo"},
+      {"role": "system", "content": "Audit product image. Output JSON: {\"has_brand_name\":bool,\"brand_names_found\":[],\"has_logo\":bool,\"has_watermark\":bool,\"has_chinese_text\":bool,\"is_promo_banner\":bool,\"needs_cleaning\":bool,\"cleaning_reason\":\"brand|logo|watermark|text|promo|none\",\"description\":\"\"}"},
       {"role": "user", "content": [
-        {"type": "text", "text": "Does this image contain brand names, logos, watermarks, or Chinese text? Is it a product photo or a promo banner?"},
+        {"type": "text", "text": "Audit this image for brand names, logos, watermarks, or Chinese text. Be thorough — do not miss small watermarks or corner logos."},
         {"type": "image_url", "image_url": {"url": "<IMAGE_URL>"}}
       ]}
     ],
-    "max_tokens": 50
+    "max_tokens": 600
   }'
 ```
 
-**Classification categories:**
+**Classification (from audit JSON) — depends on WHICH column the image is in:**
 
-| Category | Definition | Action |
-|----------|-----------|--------|
-| `clean` | Product photo, no brand/logo/watermark/text | `decision: "keep"` — skip API call |
-| `brand` | Has brand name/logo/watermark (no text) | `decision: "regen"` → image gen API |
-| `text` | Has Chinese/Vietnamese/English readable text | `decision: "regen"` + extract text → image gen API |
-| `promo` | Promo banner, after-sales card, coupon, shipping info | `decision: "delete"` — remove from listing |
+⚠️ **`delete` only applies to 产品描述(C列) images.** Main image (R), sub images
+(S-Z), and variant image (AC) are NEVER deleted — they only get cleaned or kept.
 
-**Why this is fast:**
-- ✅ Vision LLM reads the URL directly — no local download
-- ✅ Only images classified as `brand` or `text` go through the image gen API
-- ✅ Clean images (typically 60-80% of total) are skipped entirely
-- ✅ Classification costs < $0.001 per image vs image gen at $0.02-0.05
+| Column | Audit result | Decision | Action |
+|--------|--------------|----------|--------|
+| **C 描述** | `is_promo_banner: true` (客服/营销/优惠/售后图) | `delete` | Remove from description HTML |
+| **C 描述** | has brand/logo/watermark/text | `regen` | Clean via image gen API |
+| **R / S-Z / AC** | has brand/logo/watermark/text | `regen` | Clean via image gen API |
+| **R / S-Z / AC** | `is_promo_banner: true` | `regen` or `keep` | **NEVER delete** — clean if it has brand/text, else keep |
+| any | all false | `keep` | Original is fine, no processing |
+
+**Real examples found in audit:**
+- (C描述列) 客服/店铺声明/优惠券 banner → **delete** (only in description)
+- `NIU` motorcycle logo on variant image (AC) → regen (remove logo, keep image)
+- "舒适出行/记忆海绵增高垫" Chinese text → regen (translate)
+- "LIMITED EDITION" English text, no brand → keep (English is fine)
+
+> **关键规则**: 主图/附图/变种图**绝不删除**,只做去品牌/logo/水印+翻译。
+> 只有**产品描述(C列)**里与产品无关的图(客服图/营销图/优惠信息/售后信息)才删除。
+
+> **Lesson learned**: Always audit. The vision LLM catches small corner logos,
+> background watermarks, brand names that are easy to miss. See
+> `references/image-rules.md` for full audit protocol.
 
 ### Step 4 — Batch image generation
 
 Process only `brand`/`text` images. Send multiple requests in parallel.
 
-**Primary — Doubao Seedream 5.0** (2K, best quality):
+**Primary — nano-banana-2** (up to 4K, supports up to 7 reference images):
+
+```bash
+curl -X POST "https://www.hfsyapi.cn/v1beta/models/nano-banana-2:generateContent" \
+  -H "Authorization: Bearer $HFSY_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "User-Agent: curl/7.68.0" \
+  -d '{
+    "contents": [{
+      "parts": [
+        {"text": "Remove brand names, logos and watermarks from the image, and translate all text to Vietnamese."},
+        {"fileData": {"mimeType": "image/jpeg", "fileUri": "<IMAGE_URL>"}}
+      ]
+    }],
+    "generationConfig": {"imageConfig": {"imageSize": "4K", "aspectRatio": "1:1"}}
+  }'
+```
+
+**Response:** URL in `candidates[0].content.parts[].fileData.fileUri`
+
+Or use the wrapper: `python scripts/nano_gen.py clean --image "<url>" --size 4K`
+
+**Fallback 1 — Doubao Seedream 5.0** (2K):
 
 ```bash
 curl -X POST "https://ark.cn-beijing.volces.com/api/v3/images/generations" \
@@ -240,15 +228,11 @@ curl -X POST "https://ark.cn-beijing.volces.com/api/v3/images/generations" \
     "prompt": "Remove brand names, logos and watermarks from the image, and translate all text to Vietnamese.",
     "image": "<IMAGE_URL>",
     "sequential_image_generation": "disabled",
-    "response_format": "url",
-    "size": "2K",
-    "watermark": false
+    "response_format": "url", "size": "2K", "watermark": false
   }'
 ```
 
-**Response:** `{"data": [{"url": "https://...tos-cn-beijing...jpeg"}]}`
-
-**Fallback — GPT-Image-2 via hfsyapi** (when Doubao fails):
+**Fallback 2 — GPT-Image-2 via hfsyapi** (1K):
 
 ```bash
 curl -X POST "https://www.hfsyapi.cn/v1/images/generations" \
@@ -258,21 +242,19 @@ curl -X POST "https://www.hfsyapi.cn/v1/images/generations" \
   -d '{
     "model": "gpt-image-2",
     "prompt": "Remove brand names, logos and watermarks from the image, and translate all text to Vietnamese.",
-    "reference_images": ["<IMAGE_URL>"],
-    "size": "1024x1024",
-    "n": 1,
-    "response_format": "url"
+    "reference_images": ["<IMAGE_URL>"], "size": "1024x1024", "n": 1, "response_format": "url"
   }'
 ```
 
+**⚠️ ALL returned URLs are signed links that expire in ~24 hours.** Upload to
+TikTok Shop promptly (TikTok caches to its own CDN, so expiry doesn't matter
+once uploaded). If you process a sheet but don't list within 24h, re-run the
+image gen from the original alicdn URLs (preserved in the sheet source column).
+
 **Speed tips:**
 - **Deduplicate first**: 94 rows × 12 images = 1128 → typically only **120 unique images**
-- **Parallelize**: Run 5-10 concurrent curl requests (most APIs support concurrent calls)
-- **For gw.alicdn images**: Some CDNs block API fetch. Download to temp → base64 → send as data URI to hfsyapi:
-  ```bash
-  curl -s "<GW_ALICDN_URL>" | base64 -w0 > /tmp/img_b64.txt
-  # Then use "data:image/jpeg;base64,$(cat /tmp/img_b64.txt)" in reference_images
-  ```
+- **Parallelize**: Run 5-10 concurrent requests
+- **For gw.alicdn images**: Some CDNs block API fetch. Download → base64 → send as data URI. See `references/recipes.md`.
 
 ### Step 5 — Extract weight/dimensions (from text-containing images)
 
@@ -304,13 +286,43 @@ Main image and sub image results are shared across all variant rows of the
 same product. After processing the first row's images, copy the results
 to all other rows of that product.
 
-### Step 7 — Finalize
+### Step 7 — Align to output template (35 columns)
+
+Input xlsx has 45 columns (A-AS). TikTok Vietnam output template requires
+exactly **35 columns**. After finalize, restructure:
+
+- **Rename**: Column O "价格(站点币种)" → "本地展示价(站点币种)"
+- **Drop**: columns 37-45 (备注/店铺名/sku ID/产品id/全球id/店铺币种/时间)
+
+See `references/output-template.md` for the exact 35-column structure and
+template headers (including `*` and `（必填）` markers).
+
+### Step 8 — Finalize
 
 ```bash
 python scripts/run_pipeline.py finalize "<xlsx>" work.json "<xlsx>"
 ```
 
 Writes everything back. Backs up original first.
+
+### Step 9 — Empty value check (REQUIRED)
+
+Verify all `*` required fields are filled (TikTok rejects empty required fields):
+
+```bash
+python scripts/check_sheet.py "<xlsx>" <check_name>
+```
+
+**Required**: 分类id, 产品标题, 产品描述, 本地展示价, 库存, 产品主图,
+重量(kg), 长(cm), 宽(cm), 高(cm), 仓库名称.
+
+**Fill strategy for empty weight/dimensions:**
+1. Extract from image text (vision LLM)
+2. Extract from variant values (e.g. "3.0cm [dài 5m]" → W=3, L=500)
+3. Reasonable estimate by product type (see `references/output-template.md`)
+
+> Never leave required fields empty. See `references/output-template.md` for
+> the full fill strategy and verification protocol.
 
 ---
 
@@ -319,7 +331,7 @@ Writes everything back. Backs up original first.
 | Col | Field | Description | Treatment |
 |-----|-------|-------------|-----------|
 | B | 产品标题 | Product title | Agent: Chinese→Vietnamese, ≤80, de-brand |
-| C | Tiktok产品描述 | HTML `<img src=…>` description | Drop promo imgs, swap cleaned URLs |
+| C | Tiktok产品描述 | HTML `<img src=…>` description | **Delete** unrelated imgs (客服/营销/优惠/售后), clean+swap product imgs |
 | D | 品牌 | Brand name | Deterministic: `Generic N/A` |
 | F | sku | SKU number | Deterministic: `YYYYMMDD + 5-digit` |
 | G | 变种属性名称一 | Variant attr name 1 | Agent: Vietnamese |
@@ -327,51 +339,25 @@ Writes everything back. Backs up original first.
 | I/J | 变种属性名称/值二 | Variant attr 2 | Same as G/H |
 | K/L | 变种属性名称/值三 | Variant attr 3 | Same as G/H |
 | Q | 库存 | Stock quantity | Deterministic: `30` |
-| R | 主图(url)地址 | Main product image | Vision pre-screen → Doubao gen → share to all rows |
-| S-Z | 附图一~八 | Sub images 1-8 | Same as R. Sub6 = shop disclaimer → delete |
+| R | 主图(url)地址 | Main product image | Vision audit → clean if brand/text → share to all rows. **NEVER delete** |
+| S-Z | 附图一~八 | Sub images 1-8 | Same as R: clean if brand/text, else keep. **NEVER delete** |
 | AA | 视频连接 | Video link | Deterministic: clear |
-| AC | 变种主题1图片 | Variant theme image | Vision pre-screen → Doubao gen (each row different) |
+| AC | 变种主题1图片 | Variant theme image | Vision audit → clean if brand/text (each row different). **NEVER delete** |
 | AD | 重量(kg) | Weight in kg | Vision extract from image text |
 | AE/AF/AG | 长/宽/高 | Dimensions L/W/H in cm | Vision extract from image text |
+
+> **删除规则只对 C列(产品描述)生效**。主图R/附图S-Z/变种图AC 绝不删除，
+> 只做去品牌/logo/水印+翻译越南语；干净图保留原样。
 
 ---
 
 ## Recipes
 
-### Batch processing script
-
-```python
-import requests, json, concurrent.futures
-
-def classify_image(url):
-    """Vision pre-screen: returns 'clean'|'brand'|'text'|'promo'"""
-    resp = requests.post("https://apihub.agnes-ai.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {AGNES_KEY}"},
-        json={"model":"agnes-2.0-flash","messages":[
-            {"role":"system","content":"Classify: clean/brand/text/promo"},
-            {"role":"user","content":[{"type":"text","text":"Classify this product image"},{"type":"image_url","image_url":{"url":url}}]}
-        ]})
-    return resp.json()["choices"][0]["message"]["content"].strip().lower()
-
-def gen_image(url):
-    """Doubao seedream: returns cleaned image URL"""
-    resp = requests.post("https://ark.cn-beijing.volces.com/api/v3/images/generations",
-        headers={"Authorization": f"Bearer {ARK_KEY}"},
-        json={"model":"doubao-seedream-5-0-260128",
-              "prompt":"Remove brand names, logos and watermarks from the image, and translate all text to Vietnamese.",
-              "image": url, "response_format":"url", "size":"2K"})
-    return resp.json()["data"][0]["url"]
-
-# Deduplicate + classify
-unique_urls = {img["orig"] for row in work["rows"] for img in row["images"]}
-with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-    classifications = dict(zip(unique_urls, ex.map(classify_image, unique_urls)))
-
-# Only generate for brand/text
-to_gen = [url for url,cls in classifications.items() if cls in ("brand","text")]
-with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
-    new_urls = dict(zip(to_gen, ex.map(gen_image, to_gen)))
-```
+See `references/recipes.md` for complete Python batch processing code:
+- Parallel vision audit (10 concurrent) + image gen (5 concurrent)
+- Doubao→hfsyapi fallback logic
+- gw.alicdn base64 workaround
+- Sharing URLs across variant rows
 
 ---
 
@@ -462,9 +448,11 @@ Requirements:
 |--------|---------|
 | `scripts/run_pipeline.py` | `prepare` (xlsx→work.json) + `finalize` (work.json→xlsx) |
 | `scripts/sheet_io.py` | xlsx dump/apply utilities |
-| `scripts/agnest_gen.py` | hfsyapi GPT-Image-2 wrapper |
-| `scripts/agnes_read.py` | Vision reading via Agnes 2.0 flash |
-| `scripts/fetch_image.py` | Download image URL to file (fallback only) |
+| `scripts/nano_gen.py` | **nano-banana-2 image gen wrapper (primary, 4K)** |
+| `scripts/agnes_gen.py` | hfsyapi GPT-Image-2 wrapper (fallback) |
+| `scripts/agnes_read.py` | Vision audit/reading via Agnes 2.0 flash |
+| `scripts/batch_process.py` | Parallel batch: audit + gen + write, one command |
+| `scripts/fetch_image.py` | Download image URL to file (for local inspection) |
 | `scripts/check_sheet.py` | Validate processed xlsx |
 | `scripts/check_pipeline.py` | Module availability check |
 
@@ -472,8 +460,10 @@ Requirements:
 
 ## References
 
-- `references/field-mapping.md` — Full column map and per-field rules
-- `references/image-rules.md` — Image classification rules + API details
+- `references/field-mapping.md` — Full column map, per-field rules, 35-col output template
+- `references/image-rules.md` — Vision audit protocol + image classification + API details
+- `references/output-template.md` — 35-column template structure + empty value check + fill strategy
+- `references/recipes.md` — Python batch processing code (parallel audit + gen, fallbacks)
 - `references/vietnamese-style.md` — Vietnamese title/variant style + IP-safe rules
 
 ---
