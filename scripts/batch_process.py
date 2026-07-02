@@ -191,40 +191,51 @@ def hfsyapi_gen(url: str, key: str, timeout: int = 300) -> str | None:
         return None
 
 
-def edit_gen(url: str, key: str, timeout: int = 300) -> str | None:
+def edit_gen(url: str, key: str, timeout: int = 300, max_retries: int = 4) -> str | None:
     """Primary: gpt-image-2 /v1/images/edits (multipart, best product preservation).
-    Edit mode keeps original closer than full regeneration. Returns URL or None."""
+    Edit mode keeps original closer than full regeneration. Returns URL or None.
+    429/5xx → exponential backoff retry (自适应限流)."""
+    import io
+    import time as _t
+    import uuid
     try:
-        import io
-        import uuid
         img = requests.get(url if url.startswith("http") else "https:" + url,
                            timeout=60, headers={"User-Agent": "Mozilla/5.0"}).content
-        boundary = uuid.uuid4().hex
-        buf = io.BytesIO()
-        for n, v in {"model": "gpt-image-2", "prompt": PROMPT,
-                     "size": "1024x1024", "response_format": "url"}.items():
-            buf.write(f'--{boundary}\r\nContent-Disposition: form-data; name="{n}"\r\n\r\n{v}\r\n'.encode())
-        buf.write(f'--{boundary}\r\nContent-Disposition: form-data; name="image"; '
-                  f'filename="i.jpg"\r\nContent-Type: image/jpeg\r\n\r\n'.encode() + img + b"\r\n")
-        buf.write(f"--{boundary}--\r\n".encode())
-        resp = requests.post(
-            "https://www.hfsyapi.cn/v1/images/edits",
-            headers={"Authorization": f"Bearer {key}",
-                     "Content-Type": f"multipart/form-data; boundary={boundary}",
-                     "User-Agent": "curl/7.68.0"},
-            data=buf.getvalue(), timeout=timeout,
-        )
-        return resp.json()["data"][0]["url"]
     except Exception:
         return None
+    for attempt in range(max_retries):
+        try:
+            boundary = uuid.uuid4().hex
+            buf = io.BytesIO()
+            for n, v in {"model": "gpt-image-2", "prompt": PROMPT,
+                         "size": "1024x1024", "response_format": "url"}.items():
+                buf.write(f'--{boundary}\r\nContent-Disposition: form-data; name="{n}"\r\n\r\n{v}\r\n'.encode())
+            buf.write(f'--{boundary}\r\nContent-Disposition: form-data; name="image"; '
+                      f'filename="i.jpg"\r\nContent-Type: image/jpeg\r\n\r\n'.encode() + img + b"\r\n")
+            buf.write(f"--{boundary}--\r\n".encode())
+            resp = requests.post(
+                "https://www.hfsyapi.cn/v1/images/edits",
+                headers={"Authorization": f"Bearer {key}",
+                         "Content-Type": f"multipart/form-data; boundary={boundary}",
+                         "User-Agent": "curl/7.68.0"},
+                data=buf.getvalue(), timeout=timeout,
+            )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                # 限流/服务端错误 → 指数退避重试
+                _t.sleep(min(2 ** attempt * 3, 30))
+                continue
+            return resp.json()["data"][0]["url"]
+        except Exception:
+            _t.sleep(min(2 ** attempt * 2, 20))
+    return None
 
 
 # ── Main pipeline ─────────────────────────────────────────
 
 
 def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
-                 work_path: str | None = None, audit_workers: int = 12,
-                 gen_workers: int = 8, gen_size: str = "4K") -> dict[str, Any]:
+                 work_path: str | None = None, audit_workers: int = 24,
+                 gen_workers: int = 24, gen_size: str = "4K") -> dict[str, Any]:
     xlsx = Path(xlsx_path).resolve()
     work = Path(work_path or xlsx.with_name("work_auto.json")).resolve()
 
@@ -364,8 +375,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--hfsy-key", default=os.environ.get("HFSY_API_KEY", ""))
     ap.add_argument("--agnes-key", default=os.environ.get("AGNES_API_KEY", ""))
     ap.add_argument("--work", default=None)
-    ap.add_argument("--audit-workers", type=int, default=12, help="parallel vision audits")
-    ap.add_argument("--gen-workers", type=int, default=8, help="parallel image generations")
+    ap.add_argument("--audit-workers", type=int, default=24, help="parallel vision audits")
+    ap.add_argument("--gen-workers", type=int, default=24, help="parallel image generations (auto-backoff on 429)")
     ap.add_argument("--gen-size", default="4K", choices=["1K", "2K", "4K"])
     args = ap.parse_args(argv)
 

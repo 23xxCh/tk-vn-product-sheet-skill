@@ -428,10 +428,21 @@ Options: `--input`/`--output`/`--done` folders, `--interval` seconds,
 | **Direct URL input** | 3× | APIs accept image URLs directly (no base64) |
 | **Single script** | 2× | No bash timeout, no manual restart |
 
-**Benchmark (94-row, ~120 unique images):**
+**Benchmark (94-row, ~120 unique images, ~35 need gen):**
 - Sequential, no pre-screen: ~60 min (120× gen) ❌
-- Sequential + pre-screen: ~15-20 min (120× vision + ~35× gen)
-- **Parallel + pre-screen (batch_process.py)**: **~3-5 min** ✅
+- Sequential + pre-screen: ~15-20 min
+- **Parallel (gen-workers 24, audit 24)**: **~2-4 min** ✅
+
+**冲2分钟内完成 (fastest)**:
+```bash
+python scripts/batch_process.py "表.xlsx" --gen-workers 40 --audit-workers 30 --gen-size 2K
+```
+- 生图并发拉到40路(edits端点自带429退避重试,超限流自动降速)
+- 审计30路
+- 2K比4K快
+- ⚠️ **实际速度取决于你的API套餐限流(RPM)**。若hfsyapi限每分钟N个请求,
+  则时间下限 = 待生图数 / N 分钟,再高的并发也突破不了这个硬上限。
+  遇429会自动指数退避重试(不会失败,只是变慢)。
 
 ---
 
