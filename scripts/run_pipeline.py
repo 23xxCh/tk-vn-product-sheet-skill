@@ -190,6 +190,27 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
         if collected_h is not None:
             ws.cell(row=r, column=sheet_io.col_idx(COL["height"])).value = collected_h
 
+    # --- column cleanup: 删「本地展示价」空列 + 「价格(站点币种)」改名「本地展示价」 ---
+    # 按标题定位,不硬编码列号(先删空列可能改变列号,所以先找再删)
+    header_row = 1
+    price_col = None
+    local_price_col = None
+    for c in range(1, ws.max_column + 1):
+        h = str(ws.cell(row=header_row, column=c).value or "").strip()
+        if h.startswith("价格") or "价格(站点币种)" in h or "价格（站点币种）" in h:
+            price_col = c
+        if h == "本地展示价" or h.startswith("本地展示价"):
+            local_price_col = c
+    # 删除独立的「本地展示价」空列(仅当它与价格列不是同一列时)
+    if local_price_col and local_price_col != price_col:
+        ws.delete_cols(local_price_col, 1)
+        # 删列后,若价格列在被删列之后,列号左移1
+        if price_col and price_col > local_price_col:
+            price_col -= 1
+    # 「价格(站点币种)」标题改名为「本地展示价」
+    if price_col:
+        ws.cell(row=header_row, column=price_col).value = "本地展示价"
+
     if Path(out_xlsx).resolve() == Path(xlsx_path).resolve():
         bak = Path(xlsx_path).with_suffix(Path(xlsx_path).suffix + ".bak")
         shutil.copy2(xlsx_path, bak)

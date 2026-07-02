@@ -18,8 +18,8 @@ Full column map (row 1 headers) and per-field treatment for the Vietnam pipeline
 | L | 变种属性值三 | translate | de-brand → Vietnamese |
 | M | 识别码类型 | keep | — |
 | N | 识别码 | keep | — |
-| O | 价格(站点币种) | **rename** | 标题改为 `本地展示价(站点币种)`（对齐模板），值保留 |
-| P | 本地展示价 | **drop** | 删除此列（合并到O），或复制O的值过来 |
+| O | 价格(站点币种) | **rename** | 标题改为 `本地展示价`，值保留（finalize自动做） |
+| P | 本地展示价 | **drop** | 删除此空列（finalize自动做） |
 | Q | 库存 | set | `30` |
 | R | 主图(url)地址 | clean | normalize; regen if brand/logo/watermark/text |
 | S–Z | 附图一~八 | clean | same as 主图 |
