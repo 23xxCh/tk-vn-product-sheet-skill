@@ -369,17 +369,40 @@ export ARK_API_KEY="..."
 export HFSY_API_KEY="..."
 export AGNES_API_KEY="..."
 
-# One command: prepare → vision screen → parallel gen → finalize
+# One command: prepare → vision audit → parallel gen → finalize
 python scripts/batch_process.py "0630-tk.xlsx"
 ```
 
 This script does everything in one shot:
 1. `prepare` — deterministic transforms (<1s)
-2. Vision pre-screen all unique images (10× parallel, ~2min for 120 images)
-3. Batch image gen for brand/text only (5× parallel Doubao→hfsyapi fallback)
+2. Vision audit all unique images (12× parallel)
+3. Batch image gen for brand/text only (8× parallel, nano→Doubao→GPT fallback)
 4. Share URLs + finalize
 
 **No bash timeouts, no manual restart, no sequential waiting.**
+
+## Folder watch mode (drop file → auto-process, no prompting)
+
+For "just drop the file in a folder and it processes itself" workflow:
+
+```bash
+python scripts/watch.py            # starts the watcher (runs until Ctrl+C)
+```
+
+- Watches `./tk_input/` folder (polls every 5s, zero dependencies)
+- Drop any `.xlsx` into `tk_input/` → auto-runs full pipeline
+- Result appears in `./tk_output/` (as `<name>_processed_<timestamp>.xlsx`)
+- Original moved to `./tk_done/` (won't be reprocessed)
+- Waits for file write to finish (size-stable check), ignores Excel `~$` lock files
+
+> ⚠️ **Note**: An AI agent has no background daemon — it can't watch folders on
+> its own. `watch.py` is a standalone Python process the user starts once; it
+> then runs unattended. The agent only runs when you send a message. For
+> "auto-process on drop" you MUST run `watch.py` (a real long-running process),
+> not rely on the agent noticing files.
+
+Options: `--input`/`--output`/`--done` folders, `--interval` seconds,
+`--gen-size 4K`, `--audit-workers 12 --gen-workers 8`.
 
 ---
 
@@ -452,6 +475,7 @@ Requirements:
 | `scripts/agnes_gen.py` | hfsyapi GPT-Image-2 wrapper (fallback) |
 | `scripts/agnes_read.py` | Vision audit/reading via Agnes 2.0 flash |
 | `scripts/batch_process.py` | Parallel batch: audit + gen + write, one command |
+| `scripts/watch.py` | Folder watcher: drop xlsx → auto-process (unattended) |
 | `scripts/fetch_image.py` | Download image URL to file (for local inspection) |
 | `scripts/check_sheet.py` | Validate processed xlsx |
 | `scripts/check_pipeline.py` | Module availability check |
