@@ -33,31 +33,30 @@ Process Chinese-source TikTok Shop product spreadsheets into Vietnam-site-ready
 listings. **Full URL→API→URL pipeline** — no local image downloads needed,
 no image hosting required.
 
-**For AI agents** — this skill tells you exactly how to process the spreadsheet
-step by step, with curl commands ready to copy-paste.
+**零脚本、一条命令全自动** — 别人拿到 skill 不用写任何胶水代码。
+`batch_process.py` 已内置全流程：确定性字段 + 自动翻译 + 图片审计生图 + 写回。
 
 ---
 
-## Quick Start
+## Quick Start（一条命令搞定）
 
 ```bash
 # 1. Clone
-git clone https://github.com/<user>/tk-vn-product-sheet-skill.git
+git clone https://github.com/23xxCh/tk-vn-product-sheet-skill.git
+cd tk-vn-product-sheet-skill && pip install openpyxl requests
 
 # 2. Set API keys
-export ARK_API_KEY="your_doubao_key_here"
-export HFSY_API_KEY="your_hfsyapi_key_here"
+export ARK_API_KEY="your_volcengine_key"    # minimax-m3审计+翻译, 豆包生图
+export HFSY_API_KEY="your_hfsyapi_key"       # nano-banana-2/edits/gpt-image-2生图
 
-# 3. Prepare (deterministic: brand/stock/SKU/video)
-python scripts/run_pipeline.py prepare "0630-tk.xlsx" work.json
-
-# 4. Translate titles/variants (agent fills work.json translations)
-
-# 5. Vision pre-screen → image gen → write back (see workflow below)
-
-# 6. Finalize
-python scripts/run_pipeline.py finalize "0630-tk.xlsx" work.json "0630-tk.xlsx"
+# 3. 一条命令: 确定性字段+翻译+图片审计生图+写回+35列对齐+空值检查
+python scripts/batch_process.py "0630-tk.xlsx" --gen-workers 24 --audit-workers 24
 ```
+
+**就这一条命令，全自动。** agent 不需要写循环、不需要手填 work.json、不需要
+逐张调 API。翻译(标题/变种/描述)、图片审计、生图清洗、写回全部内置。
+
+分步手动模式(需要人工介入某步时)见下方 Core Workflow。
 
 ---
 

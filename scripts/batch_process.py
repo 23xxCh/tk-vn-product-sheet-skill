@@ -2,19 +2,19 @@
 
 Usage:
   python scripts/batch_process.py "<xlsx>" [--doubao-key KEY] [--hfsy-key KEY] [--agnes-key KEY]
-  Optional: --audit-workers 12  --gen-workers 8  --gen-size 4K
+  Optional: --audit-workers 24  --gen-workers 24  --gen-size 4K
 
-Pipeline:
-  1. prepare (deterministic: brand/stock/SKU/video)
-  2. Vision audit all unique images (N parallel) → structured JSON per image
-  3. Batch image gen for brand/logo/watermark/text only
-     (M parallel, nano-banana-2 → Doubao → GPT-Image-2 fallback chain)
-  4. Share main/sub URLs to all variant rows
-  5. finalize (write all results)
+一条命令全自动 (zero glue code needed):
+  1. prepare (deterministic: brand留空/stock=30/SKU/video清空/URL归一)
+  2. auto-translate (标题/变种/描述文字 → 越南语去品牌, minimax-m3, 并发)
+  3. Vision audit all unique images (N parallel) → structured JSON per image
+  4. Batch image gen for brand/logo/watermark/text only
+     (M parallel, edits → nano-banana-2 → Doubao → generations fallback chain)
+  5. Share main/sub URLs to all variant rows
+  6. finalize (write all results + 45→35列对齐)
 
 Concurrency = Python ThreadPoolExecutor (no agent runtime needed, open-source
-friendly). The bottleneck is API wait time (image gen 30-60s each), so N
-concurrent requests give near-linear speedup.
+friendly). Bottleneck is API wait; 429/5xx auto-backoff-retry (自适应限流).
 """
 from __future__ import annotations
 
@@ -43,6 +43,50 @@ AUDIT_SYSTEM = (
     '"has_watermark":bool,"has_chinese_text":bool,"is_promo_banner":bool,'
     '"needs_cleaning":bool,"cleaning_reason":"brand|logo|watermark|text|promo|none"}'
 )
+
+# 批量翻译的 system prompt (标题/变种/描述文字一次性翻译, 去品牌+越南语)
+TRANSLATE_SYSTEM = (
+    "你是TikTok越南站跨境电商翻译专家。把给定JSON里的中文字段翻译成越南语,规则:\n"
+    "1. title(产品标题): 品类名词开头, ≤80字符, 删除'原装/原厂/正品/专柜/官方', "
+    "品牌词改成'phù hợp với [品牌]'形式, 避免侵权.\n"
+    "2. vname/vval(变种属性名/值): 删品牌名+译越南语. 颜色分类→Phân loại màu, 商品规格→Quy cách sản phẩm.\n"
+    "3. desc_text(描述文字HTML): 删品牌名(如具体品牌改成通用词), 译越南语, 保留<p>等HTML标签.\n"
+    "只输出JSON, 键与输入完全一致, 值为越南语译文. 空值保持空."
+)
+
+
+def translate_batch(items: dict, ark_key: str, timeout: int = 120, max_retries: int = 4) -> dict:
+    """批量翻译一组中文字段→越南语. items是 {key: 中文} 的dict, 返回 {key: 越南语}.
+    用 minimax-m3 文本模型. 429/5xx 指数退避重试. 失败返回空dict(agent可后续补)."""
+    if not items or not ark_key:
+        return {}
+    import time as _t
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(
+                "https://ark.cn-beijing.volces.com/api/coding/v1/chat/completions",
+                headers={"Authorization": f"Bearer {ark_key}"},
+                json={
+                    "model": "minimax-m3",
+                    "messages": [
+                        {"role": "system", "content": TRANSLATE_SYSTEM},
+                        {"role": "user", "content": json.dumps(items, ensure_ascii=False)},
+                    ],
+                    "max_tokens": 4000,
+                },
+                timeout=timeout,
+            )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                _t.sleep(min(2 ** attempt * 3, 30))
+                continue
+            content = resp.json()["choices"][0]["message"]["content"]
+            m = re.search(r"\{.*\}", content, re.DOTALL)
+            if m:
+                return json.loads(m.group(0))
+            return {}
+        except Exception:
+            _t.sleep(min(2 ** attempt * 2, 20))
+    return {}
 
 
 # ── API call helpers ──────────────────────────────────────
@@ -243,6 +287,49 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     print("[1/5] Prepare (deterministic transforms)...", flush=True)
     rp_prepare(str(xlsx), str(work))
     w = json.loads(work.read_text(encoding="utf-8"))
+
+    # Step 1b: 自动翻译 (标题/变种/描述文字 → 越南语, 去品牌). 一次一行, 并发.
+    print(f"[1b] Auto-translate titles/variants/desc ({audit_workers} parallel)...", flush=True)
+    import openpyxl as _oxl
+    import run_pipeline as _rp
+    _wb = _oxl.load_workbook(str(xlsx), data_only=True)
+    _ws = _wb[_rp.SHEET] if _rp.SHEET in _wb.sheetnames else _wb.active
+    _CI = _rp.sheet_io.col_idx
+
+    def translate_row(row: dict) -> dict:
+        r = row["row_index"]
+        # 从原表读中文
+        src = {}
+        for key, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
+                         ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
+            v = _ws.cell(row=r, column=_CI(col)).value
+            if v and str(v).strip():
+                src[key] = str(v)
+        if row.get("desc_text_original"):
+            src["desc_text"] = row["desc_text_original"]
+        if not src:
+            return {"row_index": r, "translate": {}, "desc_text_vi": ""}
+        vi = translate_batch(src, ark_key)
+        tr = {}
+        for key, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
+                         ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
+            if vi.get(key):
+                tr[col] = vi[key]
+        return {"row_index": r, "translate": tr, "desc_text_vi": vi.get("desc_text", "")}
+
+    if ark_key:
+        with ThreadPoolExecutor(max_workers=audit_workers) as ex:
+            trans = {res["row_index"]: res for res in ex.map(translate_row, w["rows"])}
+        for row in w["rows"]:
+            t = trans.get(row["row_index"])
+            if t:
+                row["translate"] = t["translate"]
+                if t["desc_text_vi"]:
+                    row["desc_text_vi"] = t["desc_text_vi"]
+        n_tr = sum(1 for t in trans.values() if t["translate"])
+        print(f"   translated {n_tr} rows", flush=True)
+    else:
+        print("   跳过(无ark_key), 翻译需agent手动填work.json", flush=True)
 
     # Collect unique image URLs (dedup — 94 rows x 12 imgs -> ~120 unique)
     unique_urls: dict[str, dict] = {}
