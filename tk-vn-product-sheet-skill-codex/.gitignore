@@ -1,0 +1,25 @@
+# Secrets
+.env
+assets/agnes_key.txt
+assets/*.key
+assets/*.txt
+
+# Temp
+*.bak
+work.json
+__pycache__/
+outputs/
+/tmp/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Watch mode folders
+tk_input/
+tk_output/
+tk_done/
+
+# 本地需求记录,不推送
+CLAUDE.md
