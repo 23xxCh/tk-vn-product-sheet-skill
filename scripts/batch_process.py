@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
+import random
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -87,6 +90,94 @@ def translate_batch(items: dict, ark_key: str, timeout: int = 120, max_retries: 
         except Exception:
             _t.sleep(min(2 ** attempt * 2, 20))
     return {}
+
+
+# ── Helpers: key rotation, checkpoint, progress ────────────────────────────
+
+
+class KeyRoundRobin:
+    """Thread-safe round-robin key distributor."""
+
+    def __init__(self, keys: list[str]):
+        self._keys = keys
+        self._counter = 0
+        self._lock = threading.Lock()
+
+    def next_key(self) -> str | None:
+        if not self._keys:
+            return None
+        with self._lock:
+            key = self._keys[self._counter % len(self._keys)]
+            self._counter += 1
+            return key
+
+
+def checkpoint_save(path: str, completed: dict, total: int) -> None:
+    """Save current gen progress to checkpoint JSON."""
+    data = {
+        "checkpoint_version": 1,
+        "completed": completed,
+        "total": total,
+        "timestamp": time.time(),
+    }
+    Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def checkpoint_load(path: str) -> dict | None:
+    """Load checkpoint. Returns None if not found or corrupted."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _print_progress(done: int, total: int, elapsed: float, label: str = "") -> None:
+    """Print a text progress bar to stderr."""
+    if total == 0:
+        pct = 100.0
+    else:
+        pct = done / total * 100
+    bar_len = 30
+    filled = int(bar_len * done / max(total, 1))
+    bar = "=" * filled + "-" * (bar_len - filled)
+    eta_secs = 0
+    if done > 0 and elapsed > 0:
+        eta_secs = (elapsed / done) * (total - done)
+    if eta_secs > 60:
+        eta_str = f"{int(eta_secs // 60)}m{int(eta_secs % 60)}s"
+    else:
+        eta_str = f"{int(eta_secs)}s"
+    prefix = f"  [{label}] " if label else "  "
+    sys.stderr.write(f"\r{prefix}[{bar}] {done}/{total} ({pct:.0f}%) ETA {eta_str}  ")
+    sys.stderr.flush()
+    if done >= total:
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+
+
+def _try_key_chain(callable_fn, max_attempts: int = 3) -> Any | None:
+    """Try callable_fn() with exponential backoff on retryable errors."""
+    last_err = None
+    for attempt in range(max_attempts):
+        try:
+            result = callable_fn()
+            if result is not None:
+                return result
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code in (429, 500, 502, 503, 504):
+                delay = 1.0 * (2 ** attempt) * (0.5 + random.random())
+                time.sleep(delay)
+                last_err = e
+                continue
+            return None  # non-retryable (401, 400, etc.)
+        except Exception as e:
+            delay = 1.0 * (2 ** attempt) * (0.5 + random.random())
+            time.sleep(delay)
+            last_err = e
+    return None
 
 
 # ── API call helpers ──────────────────────────────────────
@@ -279,7 +370,18 @@ def edit_gen(url: str, key: str, timeout: int = 300, max_retries: int = 4) -> st
 
 def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                  work_path: str | None = None, audit_workers: int = 24,
-                 gen_workers: int = 24, gen_size: str = "4K") -> dict[str, Any]:
+                 gen_workers: int = 24, gen_size: str = "4K",
+                 _ark_keys: list[str] | None = None,
+                 _hfsy_keys: list[str] | None = None,
+                 _checkpoint_path: str | None = None) -> dict[str, Any]:
+    xlsx = Path(xlsx_path).resolve()
+    work = Path(work_path or xlsx.with_name("work_auto.json")).resolve()
+
+    # Multi-key setup (backward compat: single key falls through)
+    ark_keys = _ark_keys or ([ark_key] if ark_key else [])
+    hfsy_keys = _hfsy_keys or ([hfsy_key] if hfsy_key else [])
+    agnes_keys = [agnes_key] if agnes_key else []
+
     xlsx = Path(xlsx_path).resolve()
     work = Path(work_path or xlsx.with_name("work_auto.json")).resolve()
 
@@ -296,30 +398,41 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     _ws = _wb[_rp.SHEET] if _rp.SHEET in _wb.sheetnames else _wb.active
     _CI = _rp.sheet_io.col_idx
 
-    def translate_row(row: dict) -> dict:
+    def translate_row(row: dict, key: str) -> dict:
         r = row["row_index"]
-        # 从原表读中文
         src = {}
-        for key, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
-                         ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
+        for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
+                              ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
             v = _ws.cell(row=r, column=_CI(col)).value
             if v and str(v).strip():
-                src[key] = str(v)
+                src[key_name] = str(v)
         if row.get("desc_text_original"):
             src["desc_text"] = row["desc_text_original"]
         if not src:
             return {"row_index": r, "translate": {}, "desc_text_vi": ""}
-        vi = translate_batch(src, ark_key)
+        vi = translate_batch(src, key)
         tr = {}
-        for key, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
-                         ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
-            if vi.get(key):
-                tr[col] = vi[key]
+        for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
+                              ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
+            if vi.get(key_name):
+                tr[col] = vi[key_name]
         return {"row_index": r, "translate": tr, "desc_text_vi": vi.get("desc_text", "")}
 
-    if ark_key:
+    # Multi-key translation via round-robin
+    if ark_keys:
+        _rr_trans = KeyRoundRobin(ark_keys)
+        _trans_lock = threading.Lock()
+        trans: dict[int, dict] = {}
+
+        def _translate_row_rr(row: dict) -> dict:
+            key = _rr_trans.next_key() or ark_key
+            result = translate_row(row, key)
+            with _trans_lock:
+                trans[result["row_index"]] = result
+            return result
+
         with ThreadPoolExecutor(max_workers=audit_workers) as ex:
-            trans = {res["row_index"]: res for res in ex.map(translate_row, w["rows"])}
+            list(ex.map(_translate_row_rr, w["rows"]))
         for row in w["rows"]:
             t = trans.get(row["row_index"])
             if t:
@@ -331,7 +444,7 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     else:
         print("   跳过(无ark_key), 翻译需agent手动填work.json", flush=True)
 
-    # Collect unique image URLs (dedup — 94 rows x 12 imgs -> ~120 unique)
+    # Collect unique image URLs (dedup)
     unique_urls: dict[str, dict] = {}
     for row in w["rows"]:
         for img in row["images"]:
@@ -350,29 +463,23 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
             audits[fut[f]] = f.result()
 
     def classify(a: dict, source: str) -> str:
-        """Classify an image. `delete` ONLY applies to desc(C) column images.
-        Main/sub/variant images are never deleted — only cleaned or kept."""
+        """Classify an image. `delete` ONLY applies to desc(C) column images."""
         needs_clean = (a.get("needs_cleaning") or a.get("has_brand_name")
                        or a.get("has_logo") or a.get("has_watermark")
                        or a.get("has_chinese_text"))
         if source == "desc":
-            # description column: unrelated promo/service imgs can be deleted
             if a.get("is_promo_banner"):
                 return "delete"
             return "regen" if needs_clean else "keep"
         else:
-            # main / sub / variant: NEVER delete, only clean or keep
             return "regen" if needs_clean else "keep"
 
-    # a url may appear in multiple columns; a url used ONLY in desc can be
-    # deleted, but if the same url is also a main/sub/variant image it must
-    # not be deleted. Track the "strongest" source per url (non-desc wins).
     url_source: dict[str, str] = {}
     for row in w["rows"]:
         for img in row["images"]:
             u, s = img["orig"], img.get("source", "desc")
             if u not in url_source or url_source[u] == "desc":
-                url_source[u] = s  # non-desc source overrides desc
+                url_source[u] = s
 
     decisions = {url: classify(audits.get(url, {}), url_source.get(url, "desc"))
                  for url in all_urls}
@@ -384,45 +491,111 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     # Step 3: Generate only for regen (parallel, fallback chain)
     to_gen = [u for u in all_urls if decisions.get(u) == "regen"]
     print(f"[3/5] Image gen for {len(to_gen)} images ({gen_workers} parallel)...", flush=True)
-    gen_results: dict[str, str | None] = {}
 
+    # Checkpoint/resume
+    ckpt_path = _checkpoint_path or str(work.with_name("_checkpoint.json"))
+    cp = checkpoint_load(ckpt_path)
+    cp_completed: dict[str, dict] = cp.get("completed", {}) if cp else {}
+    cp_total = cp.get("total", len(to_gen)) if cp else len(to_gen)
+    previously_success = {u for u, info in cp_completed.items() if info.get("result") == "success"}
+    previously_failed = {u for u, info in cp_completed.items() if info.get("result") == "failed"}
+    to_gen = [u for u in to_gen if u not in previously_success]
+    if cp_completed:
+        print(f"   checkpoint resume: {len(previously_success)} skipped (OK), "
+              f"{len(previously_failed)} skipped (failed), {len(to_gen)} remaining", flush=True)
+
+    gen_results: dict[str, str | None] = {}
+    _gen_lock = threading.Lock()
+    _cp_done = 0
+
+    # Multi-key gen pipeline with retry
     def gen_one(url: str) -> tuple[str, str | None]:
-        # edits (best preservation) → nano-banana-2(4K) → Doubao(2K) → GPT generations(1K)
-        if hfsy_key:
-            r = edit_gen(url, hfsy_key)
-            if r:
-                return url, r
-        if hfsy_key:
-            r = nano_gen(url, hfsy_key, size=gen_size)
-            if r:
-                return url, r
-        if ark_key:
-            r = doubao_gen(url, ark_key)
-            if r:
-                return url, r
-        if hfsy_key:
-            r = hfsyapi_gen(url, hfsy_key)
-            if r:
-                return url, r
+        # edits → nano-banana-2 → Doubao → GPT generations
+        r = _try_key_chain(lambda: edit_gen(url, rr_edits.next_key() or hfsy_key))
+        if r:
+            return url, r
+        r = _try_key_chain(lambda: nano_gen(url, rr_nano.next_key() or hfsy_key, size=gen_size))
+        if r:
+            return url, r
+        r = _try_key_chain(lambda: doubao_gen(url, rr_doubao.next_key() or ark_key))
+        if r:
+            return url, r
+        r = _try_key_chain(lambda: hfsyapi_gen(url, rr_hfsyapi.next_key() or hfsy_key))
+        if r:
+            return url, r
         return url, None
 
     with ThreadPoolExecutor(max_workers=gen_workers) as ex:
         fut = {ex.submit(gen_one, url): url for url in to_gen}
+        _loop_start = time.monotonic()
         for f in as_completed(fut):
-            _, new_url = f.result()
-            gen_results[fut[f]] = new_url
+            orig_url, new_url = f.result()
+            with _gen_lock:
+                _cp_done += 1
+                gen_results[orig_url] = new_url
+                if _cp_done % 5 == 0:
+                    _save_cp = dict(cp_completed)
+                    _save_cp[orig_url] = {
+                        "result": "success" if new_url else "failed",
+                        "new_url": new_url or "",
+                        "finished_at": time.time(),
+                    }
+                    checkpoint_save(ckpt_path, _save_cp, cp_total)
+                elapsed = time.monotonic() - _loop_start
+                _print_progress(_cp_done, len(to_gen), elapsed, "gen")
+
+    # Global retry pool: retry failed images up to 2 more times with different keys
+    failed_urls = [u for u, r in gen_results.items() if not r]
+    max_retries = 2
+    retry_round = 0
+    while failed_urls and retry_round < max_retries:
+        retry_round += 1
+        # Reset key RRs for fresh key rotation
+        rr_edits = KeyRoundRobin(hfsy_keys) if hfsy_keys else None
+        rr_nano = KeyRoundRobin(hfsy_keys) if hfsy_keys else None
+        rr_doubao = KeyRoundRobin(ark_keys) if ark_keys else None
+        rr_hfsyapi = KeyRoundRobin(hfsy_keys) if hfsy_keys else None
+        print(f"   Retry round {retry_round}/{max_retries}: {len(failed_urls)} failed images...", flush=True)
+        time.sleep(3)  # brief pause before retry
+
+        with ThreadPoolExecutor(max_workers=min(gen_workers, len(failed_urls))) as ex:
+            fut = {ex.submit(gen_one, url): url for url in failed_urls}
+            _retry_start = time.monotonic()
+            _retry_done = 0
+            for f in as_completed(fut):
+                orig_url, new_url = f.result()
+                with _gen_lock:
+                    gen_results[orig_url] = new_url
+                    _retry_done += 1
+                    elapsed = time.monotonic() - _retry_start
+                    _print_progress(_retry_done, len(failed_urls), elapsed, "retry")
+                    if new_url:
+                        # Success in retry — update checkpoint
+                        _save_cp = dict(cp_completed)
+                        _save_cp[orig_url] = {
+                            "result": "success",
+                            "new_url": new_url,
+                            "finished_at": time.time(),
+                            "retry_round": retry_round,
+                        }
+                        checkpoint_save(ckpt_path, _save_cp, cp_total)
+
+        failed_urls = [u for u, r in gen_results.items() if not r]
 
     gen_ok = sum(1 for v in gen_results.values() if v)
     gen_fail = sum(1 for v in gen_results.values() if not v)
     print(f"   generated {gen_ok} OK, {gen_fail} failed (kept original)", flush=True)
 
-    # Apply results to work.json (per-image, respecting source column)
+    # Clean up checkpoint after successful completion
+    if Path(ckpt_path).exists():
+        Path(ckpt_path).unlink()
+
+    # Apply results to work.json
     for row in w["rows"]:
         for img in row["images"]:
             url = img["orig"]
             src = img.get("source", "desc")
             d = decisions.get(url, "keep")
-            # Safety: delete only ever applies to desc images
             if d == "delete" and src != "desc":
                 d = "regen" if gen_results.get(url) else "keep"
             if d == "delete":
@@ -433,7 +606,7 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                     img["decision"] = "regen"
                     img["new_url"] = new_url
                 else:
-                    img["decision"] = "keep"  # gen failed, keep original
+                    img["decision"] = "keep"
                     img["new_url"] = ""
             else:
                 img["decision"] = "keep"
@@ -455,33 +628,63 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     }
 
 
+def _parse_keys(key_str: str) -> list[str]:
+    """Parse comma-separated key string. Returns list of non-blank keys."""
+    if not key_str:
+        return []
+    return [k.strip() for k in key_str.split(",") if k.strip()]
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description="Auto batch process TikTok Vietnam product sheet")
     ap.add_argument("xlsx", help="Path to xlsx file")
-    ap.add_argument("--doubao-key", default=os.environ.get("ARK_API_KEY", ""))
-    ap.add_argument("--hfsy-key", default=os.environ.get("HFSY_API_KEY", ""))
-    ap.add_argument("--agnes-key", default=os.environ.get("AGNES_API_KEY", ""))
+    ap.add_argument("--doubao-key", default=os.environ.get("ARK_API_KEY", ""),
+                    help="Doubao/minimax-m3 key(s), comma-separated for rotation")
+    ap.add_argument("--hfsy-key", default=os.environ.get("HFSY_API_KEY", ""),
+                    help="HFSy API key(s), comma-separated for rotation")
+    ap.add_argument("--agnes-key", default=os.environ.get("AGNES_API_KEY", ""),
+                    help="Agnes vision key(s), comma-separated for rotation")
     ap.add_argument("--work", default=None)
     ap.add_argument("--audit-workers", type=int, default=24, help="parallel vision audits")
-    ap.add_argument("--gen-workers", type=int, default=24, help="parallel image generations (auto-backoff on 429)")
+    ap.add_argument("--gen-workers", type=int, default=0,
+                    help="parallel image generations (0=default to min(50, CPU*2))")
     ap.add_argument("--gen-size", default="4K", choices=["1K", "2K", "4K"])
+    ap.add_argument("--checkpoint", default=None,
+                    help="Checkpoint file path for resume support")
     args = ap.parse_args(argv)
+
+    # Parse multi-key support
+    ark_keys = _parse_keys(args.doubao_key)
+    hfsy_keys = _parse_keys(args.hfsy_key)
+    agnes_keys = _parse_keys(args.agnes_key)
+
+    # Compute default workers
+    if args.gen_workers <= 0:
+        try:
+            ncpu = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            ncpu = os.cpu_count() or 1
+        args.gen_workers = min(50, ncpu * 2)
 
     print("=== TK-VN Product Sheet Auto Processor ===", flush=True)
     print(f"Input: {args.xlsx}", flush=True)
-    print(f"nano-banana-2/GPT-Image-2: {'ok' if args.hfsy_key else 'MISSING'}  "
-          f"Doubao: {'ok' if args.doubao_key else 'MISSING'}  "
-          f"Vision: {'ok' if args.agnes_key else 'MISSING'}", flush=True)
+    print(f"HFSy keys: {len(hfsy_keys)}  Doubao keys: {len(ark_keys)}  Agnes keys: {len(agnes_keys)}", flush=True)
+    print(f"nano-banana-2/GPT-Image-2: {'ok' if hfsy_keys else 'MISSING'}  "
+          f"Doubao: {'ok' if ark_keys else 'MISSING'}  "
+          f"Vision: {'ok' if agnes_keys else 'MISSING'}", flush=True)
     print(f"Concurrency: audit={args.audit_workers} gen={args.gen_workers} size={args.gen_size}\n", flush=True)
 
-    report = auto_process(args.xlsx, args.doubao_key, args.hfsy_key, args.agnes_key,
-                          args.work, args.audit_workers, args.gen_workers, args.gen_size)
+    report = auto_process(
+        args.xlsx,
+        args.doubao_key, args.hfsy_key, args.agnes_key,
+        args.work, args.audit_workers, args.gen_workers, args.gen_size,
+        _ark_keys=ark_keys, _hfsy_keys=hfsy_keys,
+        _checkpoint_path=args.checkpoint,
+    )
     print("\n=== Summary ===", flush=True)
     for k, v in report.items():
         print(f"  {k}: {v}", flush=True)
     return 0
-
-
+  
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
-

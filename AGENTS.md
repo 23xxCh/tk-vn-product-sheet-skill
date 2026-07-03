@@ -1,37 +1,29 @@
-# AGENTS.md — tk-vn-product-sheet-skill (v4)
+# AGENTS.md - tk-vn-product-sheet-skill
 
-## Purpose
+## 用途
 
-Process TikTok Shop Vietnam product spreadsheets:
-1. Deterministic transforms (brand→Generic N/A, stock→30, SKU→date+seq, clear video)
-2. Translate Chinese titles/variants → Vietnamese (≤80 chars, de-branded, IP-safe)
-3. Vision pre-screen images → only clean images that need it via Doubao/GPT-Image-2
-4. Extract weight/dimensions from image text via vision LLM
+处理 TikTok 越南站商品表格：确定性清洗 + AI 翻译 + 图像清洗。
 
-## Activation
+## 默认工作流
 
-`/tk-vn-product-sheet-skill 处理 <xlsx_path>`
+```bash
+python scripts/batch_process.py "<xlsx>" --hfsy-key $HFSY_API_KEY --doubao-key $ARK_API_KEY --agnes-key $AGNES_API_KEY
+```
 
-## Quick workflow
+## 分步工作流
 
-1. `python scripts/run_pipeline.py prepare <xlsx> work.json`
-2. Agent fills `work.json` translations: title (B), variant names/values (G-L)
-3. **Vision pre-screen** each unique image URL via `agnes-2.0-flash`:
-   - `clean` → keep (60-80% of images)
-   - `brand`/`text` → send to Doubao/hfsyapi for cleaning
-   - `promo` → delete
-4. **Batch image gen** (only brand/text, 5-10 parallel):
-   - Primary: Doubao Seedream 5.0 (2K)
-   - Fallback: GPT-Image-2 via hfsyapi
-5. Share main/sub URLs to all variant rows
-6. `python scripts/run_pipeline.py finalize <xlsx> work.json <xlsx>`
+```bash
+python scripts/run_pipeline.py prepare "<xlsx>" work.json
+# 编辑 work.json
+python scripts/run_pipeline.py finalize "<xlsx>" work.json "output.xlsx"
+```
 
-## API keys (user-provided)
+## 验证
 
-| Variable | Purpose |
-|----------|---------|
-| `ARK_API_KEY` | Doubao Seedream 5.0 (primary image gen, 2K) |
-| `HFSY_API_KEY` | GPT-Image-2 (fallback image gen, 1K) |
-| `AGNES_API_KEY` | Agnes 2.0 flash (vision pre-screening) |
-
-See `SKILL.md` for full details, curl examples, and parallel batch recipes.
+```bash
+python scripts/check_sheet.py "output.xlsx" brand_set
+python scripts/check_sheet.py "output.xlsx" stock_set
+python scripts/check_sheet.py "output.xlsx" video_cleared
+python scripts/check_sheet.py "output.xlsx" sku_format
+python scripts/check_sheet.py "output.xlsx" image_urls_https
+```
