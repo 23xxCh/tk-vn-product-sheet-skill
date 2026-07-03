@@ -1,0 +1,1 @@
+clean_product_photo_main: https://img.alicdn.com/plain_product.jpg

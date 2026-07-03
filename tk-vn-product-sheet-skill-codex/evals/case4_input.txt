@@ -1,0 +1,1 @@
+desc_with_promo: <img src="https://img.alicdn.com/product.jpg"><img src="https://img.alicdn.com/coupon_banner.jpg">
