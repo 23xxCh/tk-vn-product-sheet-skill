@@ -43,14 +43,25 @@ def col_idx(letter: str) -> int:
 
 
 def normalize_url(url: str | None) -> str:
-    """Fix protocol-relative URLs (//img...) -> https://img..."""
+    """Fix protocol-relative URLs (//img...) -> https://img...
+    Returns empty string for non-URL values (numeric 0.3, 'nan', etc.)."""
     if not url:
         return ""
     u = str(url).strip()
+    # Filter out non-URL values (numeric weights, 'nan', 'None', '0')
+    if u in {"0", "0.0", "nan", "None", "0.3"}:
+        return ""
+    try:
+        float(u)  # catches "0.3", "0.0", numeric strings
+        return ""
+    except (ValueError, TypeError):
+        pass
     if u.startswith("//"):
         return "https:" + u
     if u.startswith("http://"):
         return "https://" + u[len("http://"):]
+    if not u.startswith("https://"):
+        return ""  # not a valid URL
     return u
 
 

@@ -42,6 +42,7 @@ def cmd_process(args: argparse.Namespace) -> int:
         "--doubao-key", args.doubao_key,
         "--hfsy-key", args.hfsy_key,
         "--agnes-key", args.agnes_key,
+        "--kimi-key", args.kimi_key,
         "--gen-size", args.gen_size,
         "--gen-workers", str(gen_workers),
     ]
@@ -139,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="Doubao/minimax-m3 key(s), comma-separated for rotation")
     p.add_argument("--agnes-key", default=os.environ.get("AGNES_API_KEY", ""),
                    help="Agnes vision key(s), comma-separated for rotation")
+    p.add_argument("--kimi-key", default=os.environ.get("KIMI_API_KEY", ""),
+                   help="Kimi/Moonshot vision key (primary vision audit)")
     p.add_argument("--gen-size", default="4K", choices=["1K", "2K", "4K"])
     p.add_argument("--workers", type=int, default=0,
                    help="Gen workers (0=auto, default min(50, CPU*2))")

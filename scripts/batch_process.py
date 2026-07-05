@@ -44,7 +44,9 @@ AUDIT_SYSTEM = (
     "Audit product image. Output JSON only: "
     '{"has_brand_name":bool,"brand_names_found":[],"has_logo":bool,'
     '"has_watermark":bool,"has_chinese_text":bool,"is_promo_banner":bool,'
-    '"needs_cleaning":bool,"cleaning_reason":"brand|logo|watermark|text|promo|none"}'
+    '"needs_cleaning":bool,"cleaning_reason":"brand|logo|watermark|text|promo|none",'
+    '"weight_kg":null,"length_cm":null,"width_cm":null,"height_cm":null}'
+    "\nIf weight/dimensions text is visible, extract and convert to kg/cm. null if not found."
 )
 
 # 批量翻译的 system prompt (标题/变种/描述文字一次性翻译, 去品牌+越南语)
@@ -213,12 +215,40 @@ def _is_promo_url(url: str) -> bool:
 
 
 def vision_audit(url: str, agnes_key: str, timeout: int = 60,
-                 ark_key: str = "") -> dict:
-    """Audit a single image by URL. No local download — sends URL directly.
-    Primary: minimax-m3 via Volcengine coding endpoint (better recall on
-    brand/logo/watermark). Fallback: Agnes 2.0 flash. Returns structured dict.
+                 ark_key: str = "", kimi_key: str = "") -> dict:
+    """Audit a single image by URL.
+    Primary: Kimi moonshot-v1-8k-vision (base64, best recall).
+    Fallback 1: minimax-m3 via Volcengine (URL direct).
+    Fallback 2: Agnes 2.0 flash (URL direct).
+    Returns structured dict.
     """
-    # --- Primary: minimax-m3 (Volcengine) ---
+    # --- Primary: Kimi moonshot vision (base64) ---
+    if kimi_key:
+        try:
+            data_uri = _to_data_uri(url)
+            if data_uri:
+                resp = requests.post(
+                    "https://api.moonshot.cn/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {kimi_key}"},
+                    json={
+                        "model": "moonshot-v1-8k-vision-preview",
+                        "messages": [{"role": "user", "content": [
+                            {"type": "text", "text": AUDIT_SYSTEM + "\nBe thorough: check every corner for small logos, semi-transparent watermarks, tiny brand marks. Also extract any weight (convert to kg) and dimensions (LxWxH in cm) if visible."},
+                            {"type": "image_url", "image_url": {"url": data_uri}}
+                        ]}],
+                        "max_tokens": 600,
+                    },
+                    timeout=timeout,
+                )
+                content = resp.json()["choices"][0]["message"]["content"]
+                m = re.search(r"\{.*\}", content, re.DOTALL)
+                if m:
+                    d = json.loads(m.group(0))
+                    if "needs_cleaning" in d or "has_brand_name" in d:
+                        return d
+        except Exception:
+            pass
+    # --- Fallback 1: minimax-m3 (Volcengine) ---
     if ark_key:
         try:
             resp = requests.post(
@@ -428,7 +458,8 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                  _ark_keys: list[str] | None = None,
                  _hfsy_keys: list[str] | None = None,
                  _checkpoint_path: str | None = None,
-                 _no_gen: bool = False) -> dict[str, Any]:
+                 _no_gen: bool = False,
+                 kimi_key: str = "") -> dict[str, Any]:
     xlsx = Path(xlsx_path).resolve()
     work = Path(work_path or xlsx.with_name("work_auto.json")).resolve()
 
@@ -513,9 +544,34 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     print(f"[2/5] Vision audit ({audit_workers} parallel)...", flush=True)
     audits: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=audit_workers) as ex:
-        fut = {ex.submit(vision_audit, url, agnes_key, 60, ark_key): url for url in all_urls}
+        fut = {ex.submit(vision_audit, url, agnes_key, 60, ark_key, kimi_key): url for url in all_urls}
         for f in as_completed(fut):
             audits[fut[f]] = f.result()
+
+    # Write weight/dimensions extracted by vision audit back into work.json images
+    for row in w["rows"]:
+        for img in row["images"]:
+            a = audits.get(img["orig"], {})
+            if a.get("weight_kg") is not None:
+                try:
+                    img["weight_kg"] = float(a["weight_kg"])
+                except (ValueError, TypeError):
+                    pass
+            if a.get("length_cm") is not None:
+                try:
+                    img["l"] = float(a["length_cm"])
+                except (ValueError, TypeError):
+                    pass
+            if a.get("width_cm") is not None:
+                try:
+                    img["w"] = float(a["width_cm"])
+                except (ValueError, TypeError):
+                    pass
+            if a.get("height_cm") is not None:
+                try:
+                    img["h"] = float(a["height_cm"])
+                except (ValueError, TypeError):
+                    pass
 
     def classify(a: dict, source: str, url: str = "") -> str:
         """Classify an image. `delete` ONLY applies to desc(C) column images.
@@ -730,6 +786,8 @@ def main(argv: list[str]) -> int:
                     help="HFSy API key(s), comma-separated for rotation")
     ap.add_argument("--agnes-key", default=os.environ.get("AGNES_API_KEY", ""),
                     help="Agnes vision key(s), comma-separated for rotation")
+    ap.add_argument("--kimi-key", default=os.environ.get("KIMI_API_KEY", ""),
+                    help="Kimi/Moonshot vision key (primary vision audit)")
     ap.add_argument("--work", default=None)
     ap.add_argument("--audit-workers", type=int, default=24, help="parallel vision audits")
     ap.add_argument("--gen-workers", type=int, default=0,
@@ -769,6 +827,7 @@ def main(argv: list[str]) -> int:
         _ark_keys=ark_keys, _hfsy_keys=hfsy_keys,
         _checkpoint_path=args.checkpoint,
         _no_gen=args.no_gen,
+        kimi_key=args.kimi_key,
     )
     print("\n=== Summary ===", flush=True)
     for k, v in report.items():
