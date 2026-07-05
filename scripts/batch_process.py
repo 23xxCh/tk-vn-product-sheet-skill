@@ -60,12 +60,45 @@ TRANSLATE_SYSTEM = (
 )
 
 
-def translate_batch(items: dict, ark_key: str, timeout: int = 120, max_retries: int = 4) -> dict:
+def translate_batch(items: dict, ark_key: str, timeout: int = 120, max_retries: int = 4,
+                    kimi_key: str = "") -> dict:
     """批量翻译一组中文字段→越南语. items是 {key: 中文} 的dict, 返回 {key: 越南语}.
-    用 minimax-m3 文本模型. 429/5xx 指数退避重试. 失败返回空dict(agent可后续补)."""
-    if not items or not ark_key:
+    优先用 Kimi moonshot-v1-8k, 失败 fallback 到 minimax-m3.
+    429/5xx 指数退避重试. 失败返回空dict(agent可后续补)."""
+    if not items:
         return {}
     import time as _t
+
+    # Primary: Kimi moonshot-v1-8k
+    if kimi_key:
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(
+                    "https://api.moonshot.cn/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {kimi_key}"},
+                    json={
+                        "model": "moonshot-v1-8k",
+                        "messages": [
+                            {"role": "system", "content": TRANSLATE_SYSTEM},
+                            {"role": "user", "content": json.dumps(items, ensure_ascii=False)},
+                        ],
+                        "max_tokens": 4000,
+                    },
+                    timeout=timeout,
+                )
+                if resp.status_code == 429 or resp.status_code >= 500:
+                    _t.sleep(min(2 ** attempt * 3, 30))
+                    continue
+                content = resp.json()["choices"][0]["message"]["content"]
+                m = re.search(r"\{.*\}", content, re.DOTALL)
+                if m:
+                    return json.loads(m.group(0))
+            except Exception:
+                _t.sleep(min(2 ** attempt * 2, 20))
+
+    # Fallback: minimax-m3 via Volcengine
+    if not ark_key:
+        return {}
     for attempt in range(max_retries):
         try:
             resp = requests.post(
@@ -532,7 +565,7 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
             src["desc_text"] = row["desc_text_original"]
         if not src:
             return {"row_index": r, "translate": {}, "desc_text_vi": ""}
-        vi = translate_batch(src, key)
+        vi = translate_batch(src, key, kimi_key=kimi_key)
         tr = {}
         for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
                               ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
@@ -540,8 +573,8 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                 tr[col] = vi[key_name]
         return {"row_index": r, "translate": tr, "desc_text_vi": vi.get("desc_text", "")}
 
-    # Multi-key translation via round-robin
-    if ark_keys:
+    # Translation: Kimi (if available) or ark_keys (minimax-m3)
+    if kimi_key or ark_keys:
         _rr_trans = KeyRoundRobin(ark_keys)
         _trans_lock = threading.Lock()
         trans: dict[int, dict] = {}
