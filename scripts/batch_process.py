@@ -250,11 +250,18 @@ def vision_audit(url: str, agnes_key: str, timeout: int = 60,
                         return d
         except Exception:
             pass
-    # --- Fallback 1: Qwen-VL via Alibaba Bailian (base64) ---
+    # --- Fallback 1: Qwen-VL via Alibaba Bailian (URL direct, then base64) ---
     if bailian_key:
-        try:
-            data_uri = _to_data_uri(url)
-            if data_uri:
+        # Try URL direct first (faster, no local download)
+        for attempt_url in [True, False]:
+            try:
+                if attempt_url:
+                    img_input = {"url": url}
+                else:
+                    data_uri = _to_data_uri(url)
+                    if not data_uri:
+                        continue  # download failed, skip base64 attempt
+                    img_input = {"url": data_uri}
                 resp = requests.post(
                     "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
                     headers={"Authorization": f"Bearer {bailian_key}"},
@@ -262,7 +269,7 @@ def vision_audit(url: str, agnes_key: str, timeout: int = 60,
                         "model": "qwen-vl-plus",
                         "messages": [{"role": "user", "content": [
                             {"type": "text", "text": AUDIT_SYSTEM + "\nBe thorough: check every corner for small logos, semi-transparent watermarks, tiny brand marks. Also extract any weight (convert to kg) and dimensions (LxWxH in cm) if visible."},
-                            {"type": "image_url", "image_url": {"url": data_uri}}
+                            {"type": "image_url", "image_url": img_input}
                         ]}],
                         "max_tokens": 600,
                     },
@@ -274,8 +281,8 @@ def vision_audit(url: str, agnes_key: str, timeout: int = 60,
                     d = json.loads(m.group(0))
                     if "needs_cleaning" in d or "has_brand_name" in d:
                         return d
-        except Exception:
-            pass
+            except Exception:
+                pass
     # --- Fallback 1: minimax-m3 (Volcengine) ---
     if ark_key:
         try:
