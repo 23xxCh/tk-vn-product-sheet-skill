@@ -43,10 +43,13 @@ PROMPT = "Remove brand names, logos and watermarks from the image, and translate
 AUDIT_SYSTEM = (
     "Audit product image. Output JSON only: "
     '{"has_brand_name":bool,"brand_names_found":[],"has_logo":bool,'
-    '"has_watermark":bool,"has_chinese_text":bool,"is_promo_banner":bool,'
+    '"has_watermark":bool,"has_chinese_text":bool,"has_text":bool,"text_type":"english|chinese|mixed|none",'
+    '"is_promo_banner":bool,'
     '"needs_cleaning":bool,"cleaning_reason":"brand|logo|watermark|text|promo|none",'
     '"weight_kg":null,"length_cm":null,"width_cm":null,"height_cm":null}'
     "\nIf weight/dimensions text is visible, extract and convert to kg/cm. null if not found."
+    "\nhas_text=true if the image contains ANY text (Chinese, English, or mixed) that should be translated to Vietnamese."
+    "\nFor product description images, mark needs_cleaning=true if has_text=true (need Vietnamese translation)."
 )
 
 # 批量翻译的 system prompt (标题/变种/描述文字一次性翻译, 去品牌+越南语)
@@ -644,16 +647,20 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
 
     def classify(a: dict, source: str, url: str = "") -> str:
         """Classify an image. `delete` ONLY applies to desc(C) column images.
-        URL pattern matching catches promo/service images even when vision audit fails."""
+        URL pattern matching catches promo/service images even when vision audit fails.
+        For desc images, any text (Chinese/English) triggers regen for Vietnamese translation."""
         # URL pattern: detect promo/service/payment images by URL heuristics
         if source == "desc" and url and _is_promo_url(url):
             return "delete"
         needs_clean = (a.get("needs_cleaning") or a.get("has_brand_name")
                        or a.get("has_logo") or a.get("has_watermark")
-                       or a.get("has_chinese_text"))
+                       or a.get("has_chinese_text") or a.get("has_text"))
         if source == "desc":
             if a.get("is_promo_banner"):
                 return "delete"
+            # For description images: any text needs Vietnamese translation
+            if a.get("has_text") or a.get("has_chinese_text"):
+                return "regen"
             return "regen" if needs_clean else "keep"
         else:
             return "regen" if needs_clean else "keep"
