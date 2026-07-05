@@ -69,7 +69,7 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 
 def cmd_finalize(args: argparse.Namespace) -> int:
     mod = importlib.import_module("run_pipeline")
-    return mod.main(["finalize", args.xlsx, args.work, args.out])
+    return mod.main(["run_pipeline", "finalize", args.xlsx, args.work, args.out])
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
@@ -104,6 +104,17 @@ def cmd_push_regen(args: argparse.Namespace) -> int:
         argv += ["--field", args.field]
     if args.include_skus:
         argv += ["--include-skus"]
+    argv += ["--as", args.as_identity]
+    return mod.main(argv)
+
+
+def cmd_pull_regen(args: argparse.Namespace) -> int:
+    mod = importlib.import_module("pull_regen_from_feishu")
+    argv = [args.work_json, "--base-token", args.base_token, "--table-id", args.table_id]
+    if args.source_field:
+        argv += ["--source-field", args.source_field]
+    if args.new_field:
+        argv += ["--new-field", args.new_field]
     argv += ["--as", args.as_identity]
     return mod.main(argv)
 
@@ -181,6 +192,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--include-skus", action="store_true", help="同时写入 SKU 和列信息")
     p.add_argument("--as", dest="as_identity", default="user", choices=["user", "bot"])
     p.set_defaults(fn=cmd_push_regen)
+
+    # pull-regen
+    p = sub.add_parser("pull-regen", help="从飞书多维表格拉取处理后的图片URL到work.json")
+    p.add_argument("work_json", help="work.json 路径")
+    p.add_argument("--base-token", required=True, help="飞书 Base token")
+    p.add_argument("--table-id", required=True, help="飞书表格 ID")
+    p.add_argument("--source-field", default="附件链接", help="原始URL字段名 (默认: 附件链接)")
+    p.add_argument("--new-field", default="图片转链接", help="新URL字段名 (默认: 图片转链接)")
+    p.add_argument("--as", dest="as_identity", default="user", choices=["user", "bot"])
+    p.set_defaults(fn=cmd_pull_regen)
 
     args = parser.parse_args(argv)
     if not args.cmd:
