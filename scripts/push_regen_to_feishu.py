@@ -31,7 +31,8 @@ BATCH_SIZE = 200  # Feishu batch create limit
 
 
 def collect_regen_urls(work_path: str, include_skus: bool = False) -> list[dict]:
-    """Read work.json, return list of {url, sku?, col?} for images marked regen."""
+    """Read work.json, return list of {url, sku?, col?} for images marked regen.
+    Filters out non-URL values (e.g. numeric 0.3, 0.0, 'nan')."""
     work = json.loads(Path(work_path).read_text(encoding="utf-8"))
     seen: set[str] = set()
     records: list[dict] = []
@@ -41,7 +42,13 @@ def collect_regen_urls(work_path: str, include_skus: bool = False) -> list[dict]
             if (img.get("decision") or "").lower() != "regen":
                 continue
             url = img.get("new_url") or img.get("orig") or ""
-            if not url or url in seen:
+            # Filter out non-URL values (numeric, 'nan', '0', etc.)
+            if not url or not isinstance(url, str):
+                continue
+            url = url.strip()
+            if not url or not url.startswith(("http://", "https://", "//")):
+                continue
+            if url in seen:
                 continue
             seen.add(url)
             rec = {"url": url}
