@@ -577,38 +577,49 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     _ws = _wb[_rp.SHEET] if _rp.SHEET in _wb.sheetnames else _wb.active
     _CI = _rp.sheet_io.col_idx
 
-    def translate_row(row: dict, key: str) -> dict:
-        r = row["row_index"]
-        src = {}
-        for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
-                              ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
-            v = _ws.cell(row=r, column=_CI(col)).value
-            if v and str(v).strip():
-                src[key_name] = str(v)
-        if row.get("desc_text_original"):
-            src["desc_text"] = row["desc_text_original"]
-        if not src:
-            return {"row_index": r, "translate": {}, "desc_text_vi": ""}
-        vi = translate_batch(src, key, kimi_key=kimi_key)
-        tr = {}
-        for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
-                              ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
-            if vi.get(key_name):
-                tr[col] = vi[key_name]
-        return {"row_index": r, "translate": tr, "desc_text_vi": vi.get("desc_text", "")}
-
     # Translation: Kimi (if available) or ark_keys (minimax-m3)
+    # Uses cache to avoid re-translating identical text across rows
     if kimi_key or ark_keys:
         _rr_trans = KeyRoundRobin(ark_keys)
         _trans_lock = threading.Lock()
+        _trans_cache: dict[str, dict] = {}  # dedup identical texts
         trans: dict[int, dict] = {}
 
         def _translate_row_rr(row: dict) -> dict:
-            key = _rr_trans.next_key() or ark_key
-            result = translate_row(row, key)
+            # Build source dict first (need it for cache key)
+            src = {}
+            for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
+                                  ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
+                v = _ws.cell(row=row["row_index"], column=_CI(col)).value
+                if v and str(v).strip():
+                    src[key_name] = str(v)
+            if row.get("desc_text_original"):
+                src["desc_text"] = row["desc_text_original"]
+            if not src:
+                with _trans_lock:
+                    trans[row["row_index"]] = {"row_index": row["row_index"], "translate": {}, "desc_text_vi": ""}
+                return {}
+            # Dedup: skip API call if same text was already translated
+            cache_key = json.dumps(src, ensure_ascii=False, sort_keys=True)
             with _trans_lock:
-                trans[result["row_index"]] = result
-            return result
+                if cache_key in _trans_cache:
+                    cached = _trans_cache[cache_key]
+                    trans[row["row_index"]] = {"row_index": row["row_index"], "translate": cached["tr"], "desc_text_vi": cached["dv"]}
+                    return cached
+            # Not cached, call API
+            key = _rr_trans.next_key() or ark_key
+            vi = translate_batch(src, key, kimi_key=kimi_key)
+            tr = {}
+            for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
+                                  ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
+                if vi.get(key_name):
+                    tr[col] = vi[key_name]
+            result = {"row_index": row["row_index"], "translate": tr, "desc_text_vi": vi.get("desc_text", "")}
+            cached = {"tr": tr, "dv": vi.get("desc_text", "")}
+            with _trans_lock:
+                _trans_cache[cache_key] = cached
+                trans[row["row_index"]] = result
+            return cached
 
         with ThreadPoolExecutor(max_workers=audit_workers) as ex:
             list(ex.map(_translate_row_rr, w["rows"]))
