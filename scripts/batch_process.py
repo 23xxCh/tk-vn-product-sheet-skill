@@ -241,14 +241,39 @@ def vision_audit(url: str, agnes_key: str, timeout: int = 60,
     return {"needs_cleaning": True, "cleaning_reason": "unknown", "is_promo_banner": False}
 
 
-def _to_data_uri(url: str) -> str | None:
-    """Download image and return base64 data URI (for gw.alicdn that blocks API fetch)."""
-    try:
-        r = requests.get(url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code == 200:
-            return f"data:image/jpeg;base64,{base64.b64encode(r.content).decode()}"
-    except Exception:
-        pass
+def _to_data_uri(url: str, max_retries: int = 3, timeout: int = 30) -> str | None:
+    """Download image and return base64 data URI (for gw.alicdn that blocks API fetch).
+    Retries with different User-Agent on failure."""
+    agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    ]
+    referers = [
+        "https://www.taobao.com",
+        "https://item.taobao.com",
+        "https://detail.tmall.com",
+    ]
+    for attempt in range(max_retries):
+        try:
+            kwargs = {
+                "headers": {
+                    "User-Agent": agents[attempt % len(agents)],
+                    "Referer": referers[attempt % len(referers)],
+                },
+                "timeout": timeout,
+            }
+            r = requests.get(url, **kwargs)
+            if r.status_code == 200:
+                return f"data:image/jpeg;base64,{base64.b64encode(r.content).decode()}"
+            # 403/429 → retry with different UA
+            if r.status_code in (403, 429):
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            return None
+        except Exception:
+            if attempt < max_retries - 1:
+                time.sleep(0.5 * (attempt + 1))
     return None
 
 
@@ -373,7 +398,8 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                  gen_workers: int = 24, gen_size: str = "4K",
                  _ark_keys: list[str] | None = None,
                  _hfsy_keys: list[str] | None = None,
-                 _checkpoint_path: str | None = None) -> dict[str, Any]:
+                 _checkpoint_path: str | None = None,
+                 _no_gen: bool = False) -> dict[str, Any]:
     xlsx = Path(xlsx_path).resolve()
     work = Path(work_path or xlsx.with_name("work_auto.json")).resolve()
 
@@ -490,6 +516,33 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
 
     # Step 3: Generate only for regen (parallel, fallback chain)
     to_gen = [u for u in all_urls if decisions.get(u) == "regen"]
+
+    if _no_gen:
+        # Skip local image generation — export work.json for external processing
+        # (e.g. push regen URLs to Feishu Bitable for AI field shortcuts)
+        for row in w["rows"]:
+            for img in row["images"]:
+                url = img["orig"]
+                d = decisions.get(url, "keep")
+                if d == "delete":
+                    img["decision"] = "delete"
+                elif d == "regen":
+                    img["decision"] = "regen"  # leave new_url empty for external fill
+                    img["new_url"] = ""
+                else:
+                    img["decision"] = "keep"
+                    img["new_url"] = ""
+        work.write_text(json.dumps(w, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"[3/5] --no-gen: skipped local gen, {len(to_gen)} regen URLs in {work}", flush=True)
+        print(f"      Next: push to Feishu with `tkvn.py push-regen {work} --base-token X --table-id Y`", flush=True)
+        return {
+            "rows": len(w["rows"]),
+            "unique_images": len(all_urls),
+            "delete": n_del, "regen": n_regen, "keep": n_keep,
+            "generated_ok": 0, "generated_fail": 0,
+            "work_json": str(work),
+        }
+
     print(f"[3/5] Image gen for {len(to_gen)} images ({gen_workers} parallel)...", flush=True)
 
     # Checkpoint/resume
@@ -651,6 +704,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--gen-size", default="4K", choices=["1K", "2K", "4K"])
     ap.add_argument("--checkpoint", default=None,
                     help="Checkpoint file path for resume support")
+    ap.add_argument("--no-gen", action="store_true",
+                    help="Skip local image gen, output work.json for external processing (e.g. Feishu)")
     args = ap.parse_args(argv)
 
     # Parse multi-key support
@@ -680,6 +735,7 @@ def main(argv: list[str]) -> int:
         args.work, args.audit_workers, args.gen_workers, args.gen_size,
         _ark_keys=ark_keys, _hfsy_keys=hfsy_keys,
         _checkpoint_path=args.checkpoint,
+        _no_gen=args.no_gen,
     )
     print("\n=== Summary ===", flush=True)
     for k, v in report.items():

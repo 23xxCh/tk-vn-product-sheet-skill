@@ -37,6 +37,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+import time
 from datetime import date
 from pathlib import Path
 
@@ -224,7 +225,22 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
         bak = Path(xlsx_path).with_suffix(Path(xlsx_path).suffix + ".bak")
         shutil.copy2(xlsx_path, bak)
         print(f"backed up original -> {bak}")
-    wb.save(out_xlsx)
+
+    # Wait for Excel to close if file is locked
+    out_path = Path(out_xlsx)
+    for attempt in range(10):
+        try:
+            wb.save(out_xlsx)
+            break
+        except PermissionError:
+            if attempt < 9:
+                print(f"   Excel file locked, waiting... (attempt {attempt+1}/10)", flush=True)
+                time.sleep(2)
+            else:
+                alt = str(out_path) + "_final"
+                print(f"   ERROR: File still locked, saving to {alt}", flush=True)
+                wb.save(alt)
+                break
     print(f"finalize: wrote results -> {out_xlsx}")
 
 

@@ -48,6 +48,8 @@ def cmd_process(args: argparse.Namespace) -> int:
     checkpoint = getattr(args, 'checkpoint', None)
     if checkpoint:
         argv += ["--checkpoint", checkpoint]
+    if getattr(args, 'no_gen', False):
+        argv += ["--no-gen"]
     return mod.main(argv)
 
 
@@ -95,6 +97,17 @@ def cmd_eval(_: argparse.Namespace) -> int:
     return mod.main([])
 
 
+def cmd_push_regen(args: argparse.Namespace) -> int:
+    mod = importlib.import_module("push_regen_to_feishu")
+    argv = [args.work_json, "--base-token", args.base_token, "--table-id", args.table_id]
+    if args.field:
+        argv += ["--field", args.field]
+    if args.include_skus:
+        argv += ["--include-skus"]
+    argv += ["--as", args.as_identity]
+    return mod.main(argv)
+
+
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
@@ -120,6 +133,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="Gen workers (0=auto, default min(50, CPU*2))")
     p.add_argument("--checkpoint", default=None,
                    help="Checkpoint file for resume support")
+    p.add_argument("--no-gen", action="store_true",
+                   help="跳过本地生图,输出work.json供飞书AI字段快捷方式处理")
     p.set_defaults(fn=cmd_process)
 
     # prepare
@@ -156,6 +171,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # eval
     sub.add_parser("eval", help="运行评测").set_defaults(fn=cmd_eval)
+
+    # push-regen
+    p = sub.add_parser("push-regen", help="推送需重新生成的图片URL到飞书多维表格")
+    p.add_argument("work_json", help="work.json 路径")
+    p.add_argument("--base-token", required=True, help="飞书 Base token")
+    p.add_argument("--table-id", required=True, help="飞书表格 ID")
+    p.add_argument("--field", default="附件链接", help="接收URL的字段名 (默认: 附件链接)")
+    p.add_argument("--include-skus", action="store_true", help="同时写入 SKU 和列信息")
+    p.add_argument("--as", dest="as_identity", default="user", choices=["user", "bot"])
+    p.set_defaults(fn=cmd_push_regen)
 
     args = parser.parse_args(argv)
     if not args.cmd:
