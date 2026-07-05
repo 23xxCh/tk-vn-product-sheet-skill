@@ -21,7 +21,9 @@ from openpyxl.utils import get_column_letter
 
 SHEET_NAME = "tiktok_chanpin_"
 
-# Column letters we care about (see field-mapping.md for the full table).
+# Default column letters (used when header-based detection fails).
+# Real TikTok exports may have different column orders, so we also support
+# dynamic header-based lookup via `resolve_columns()`.
 COL = {
     "cat_id": "A", "title": "B", "desc": "C", "brand": "D", "attrs": "E",
     "sku": "F", "vname1": "G", "vval1": "H", "vname2": "I", "vval2": "J",
@@ -32,6 +34,31 @@ COL = {
     "weight": "AD", "length": "AE", "width": "AF", "height": "AG",
 }
 
+# Header name patterns for dynamic column detection.
+# Keys match COL keys; values are substrings to match against row-1 headers.
+HEADER_PATTERNS = {
+    "title": ["产品标题", "标题"],
+    "desc": ["Tiktok产品描述", "产品描述", "描述"],
+    "brand": ["品牌"],
+    "sku": ["sku", "SKU"],
+    "vname1": ["变种属性名称一", "变种属性名称1"],
+    "vval1": ["变种属性值一", "变种属性值1"],
+    "vname2": ["变种属性名称二", "变种属性名称2"],
+    "vval2": ["变种属性值二", "变种属性值2"],
+    "vname3": ["变种属性名称三", "变种属性名称3"],
+    "vval3": ["变种属性值三", "变种属性值3"],
+    "stock": ["库存"],
+    "main_img": ["主图", "主图(url)地址"],
+    "video": ["视频连接", "视频链接", "视频"],
+    "variant_img": ["变种主题1图片", "变种主题一图片", "变种图片"],
+    "weight": ["重量(kg)", "重量"],
+    "length": ["长", "长(cm)"],
+    "width": ["宽", "宽(cm)"],
+    "height": ["高", "高(cm)"],
+    "price": ["价格(站点币种)", "价格（站点币种）", "价格"],
+    "local_price": ["本地展示价"],
+}
+
 IMG_SRC_RE = re.compile(r'<img[^>]+src="([^"]+)"', re.IGNORECASE)
 
 
@@ -40,6 +67,59 @@ def col_idx(letter: str) -> int:
     for ch in letter:
         s = s * 26 + (ord(ch.upper()) - 64)
     return s
+
+
+def resolve_columns(ws) -> dict:
+    """Build a COL dict by matching HEADER_PATTERNS against ws row-1 headers.
+    Falls back to the static COL for keys not found. Also detects 附图 columns
+    by matching '附图' prefix. Returns dict with same keys as COL but letters
+    adjusted to the actual sheet. Keys not found get empty string "".
+    """
+    from openpyxl.utils import get_column_letter
+    headers = {}
+    for c in range(1, ws.max_column + 1):
+        h = str(ws.cell(row=1, column=c).value or "").strip()
+        if h:
+            headers[h] = get_column_letter(c)
+
+    # Start with empty defaults — only fill keys we actually find
+    resolved = {k: "" for k in COL}
+    # Also include price/local_price keys from HEADER_PATTERNS
+    for k in HEADER_PATTERNS:
+        if k not in resolved:
+            resolved[k] = ""
+
+    # Map by header patterns: exact match first, then substring match
+    for key, patterns in HEADER_PATTERNS.items():
+        # Pass 1: exact match (h == p)
+        for h, letter in headers.items():
+            for p in patterns:
+                if h == p:
+                    resolved[key] = letter
+                    break
+            if resolved[key]:
+                break
+        if resolved[key]:
+            continue
+        # Pass 2: substring match (p in h) — lower priority
+        for h, letter in headers.items():
+            for p in patterns:
+                if p in h:
+                    resolved[key] = letter
+                    break
+            if resolved[key]:
+                break
+
+    # Detect 附图一~八 columns dynamically
+    sub_imgs = []
+    for h, letter in headers.items():
+        if h.startswith("附图"):
+            sub_imgs.append(letter)
+    if sub_imgs:
+        sub_imgs.sort(key=col_idx)
+        resolved["sub_imgs"] = sub_imgs
+
+    return resolved
 
 
 def normalize_url(url: str | None) -> str:

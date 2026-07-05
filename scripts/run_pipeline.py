@@ -64,6 +64,10 @@ def prepare(xlsx_path: str, work_json: str) -> None:
     wb = openpyxl.load_workbook(xlsx_path, data_only=True)
     ws = wb[SHEET] if SHEET in wb.sheetnames else wb.active
 
+    # Resolve columns dynamically based on header names
+    COL = sheet_io.resolve_columns(ws)
+    SUB_COLS = COL["sub_imgs"]  # list of letters
+
     today = _today_str()
     seq = 1
     rows = []
@@ -125,13 +129,19 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
     wb = openpyxl.load_workbook(xlsx_path)
     ws = wb[SHEET] if SHEET in wb.sheetnames else wb.active
 
+    # Resolve columns dynamically based on header names
+    COL = sheet_io.resolve_columns(ws)
+    SUB_COLS = COL["sub_imgs"]
+
     img_cols = [COL["main_img"]] + SUB_COLS + [COL["variant_img"]]
     for row in work["rows"]:
         r = row["row_index"]
 
         # --- deterministic transforms (applied here so there is one write step) ---
         ws.cell(row=r, column=sheet_io.col_idx(COL["brand"])).value = None  # 品牌留空
-        ws.cell(row=r, column=sheet_io.col_idx(COL["stock"])).value = 30
+        # Stock column may not exist in all exports; only set if present
+        if COL.get("stock"):
+            ws.cell(row=r, column=sheet_io.col_idx(COL["stock"])).value = 30
         ws.cell(row=r, column=sheet_io.col_idx(COL["video"])).value = None  # delete video link
         ws.cell(row=r, column=sheet_io.col_idx(COL["sku"])).value = row["sku"]
         # normalize standalone image-cell URLs as the baseline
@@ -211,12 +221,19 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
             price_col = c
         if h == "本地展示价" or h.startswith("本地展示价"):
             local_price_col = c
-    # 删除独立的「本地展示价」空列(仅当它与价格列不是同一列时)
+    # 只删除「本地展示价」空列(所有数据行该列都为空才删)
     if local_price_col and local_price_col != price_col:
-        ws.delete_cols(local_price_col, 1)
-        # 删列后,若价格列在被删列之后,列号左移1
-        if price_col and price_col > local_price_col:
-            price_col -= 1
+        col_empty = all(
+            ws.cell(row=r, column=local_price_col).value in (None, "")
+            for r in range(2, ws.max_row + 1)
+        )
+        if col_empty:
+            ws.delete_cols(local_price_col, 1)
+            if price_col and price_col > local_price_col:
+                price_col -= 1
+        # 如果列非空(有价格数据),不删除,直接改名为本地展示价
+        else:
+            price_col = local_price_col
     # 「价格(站点币种)」标题改名为「本地展示价」
     if price_col:
         ws.cell(row=header_row, column=price_col).value = "本地展示价"
