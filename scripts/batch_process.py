@@ -215,11 +215,13 @@ def _is_promo_url(url: str) -> bool:
 
 
 def vision_audit(url: str, agnes_key: str, timeout: int = 60,
-                 ark_key: str = "", kimi_key: str = "") -> dict:
+                 ark_key: str = "", kimi_key: str = "",
+                 bailian_key: str = "") -> dict:
     """Audit a single image by URL.
     Primary: Kimi moonshot-v1-8k-vision (base64, best recall).
-    Fallback 1: minimax-m3 via Volcengine (URL direct).
-    Fallback 2: Agnes 2.0 flash (URL direct).
+    Fallback 1: Qwen-VL via Alibaba Bailian (base64).
+    Fallback 2: minimax-m3 via Volcengine (URL direct).
+    Fallback 3: Agnes 2.0 flash (URL direct).
     Returns structured dict.
     """
     # --- Primary: Kimi moonshot vision (base64) ---
@@ -232,6 +234,32 @@ def vision_audit(url: str, agnes_key: str, timeout: int = 60,
                     headers={"Authorization": f"Bearer {kimi_key}"},
                     json={
                         "model": "moonshot-v1-8k-vision-preview",
+                        "messages": [{"role": "user", "content": [
+                            {"type": "text", "text": AUDIT_SYSTEM + "\nBe thorough: check every corner for small logos, semi-transparent watermarks, tiny brand marks. Also extract any weight (convert to kg) and dimensions (LxWxH in cm) if visible."},
+                            {"type": "image_url", "image_url": {"url": data_uri}}
+                        ]}],
+                        "max_tokens": 600,
+                    },
+                    timeout=timeout,
+                )
+                content = resp.json()["choices"][0]["message"]["content"]
+                m = re.search(r"\{.*\}", content, re.DOTALL)
+                if m:
+                    d = json.loads(m.group(0))
+                    if "needs_cleaning" in d or "has_brand_name" in d:
+                        return d
+        except Exception:
+            pass
+    # --- Fallback 1: Qwen-VL via Alibaba Bailian (base64) ---
+    if bailian_key:
+        try:
+            data_uri = _to_data_uri(url)
+            if data_uri:
+                resp = requests.post(
+                    "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {bailian_key}"},
+                    json={
+                        "model": "qwen-vl-plus",
                         "messages": [{"role": "user", "content": [
                             {"type": "text", "text": AUDIT_SYSTEM + "\nBe thorough: check every corner for small logos, semi-transparent watermarks, tiny brand marks. Also extract any weight (convert to kg) and dimensions (LxWxH in cm) if visible."},
                             {"type": "image_url", "image_url": {"url": data_uri}}
@@ -459,7 +487,8 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                  _hfsy_keys: list[str] | None = None,
                  _checkpoint_path: str | None = None,
                  _no_gen: bool = False,
-                 kimi_key: str = "") -> dict[str, Any]:
+                 kimi_key: str = "",
+                 bailian_key: str = "") -> dict[str, Any]:
     xlsx = Path(xlsx_path).resolve()
     work = Path(work_path or xlsx.with_name("work_auto.json")).resolve()
 
@@ -544,7 +573,7 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     print(f"[2/5] Vision audit ({audit_workers} parallel)...", flush=True)
     audits: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=audit_workers) as ex:
-        fut = {ex.submit(vision_audit, url, agnes_key, 60, ark_key, kimi_key): url for url in all_urls}
+        fut = {ex.submit(vision_audit, url, agnes_key, 60, ark_key, kimi_key, bailian_key): url for url in all_urls}
         for f in as_completed(fut):
             audits[fut[f]] = f.result()
 
@@ -788,6 +817,8 @@ def main(argv: list[str]) -> int:
                     help="Agnes vision key(s), comma-separated for rotation")
     ap.add_argument("--kimi-key", default=os.environ.get("KIMI_API_KEY", ""),
                     help="Kimi/Moonshot vision key (primary vision audit)")
+    ap.add_argument("--bailian-key", default=os.environ.get("BAILIAN_API_KEY", ""),
+                    help="Alibaba Bailian (DashScope) key for Qwen-VL vision audit")
     ap.add_argument("--work", default=None)
     ap.add_argument("--audit-workers", type=int, default=24, help="parallel vision audits")
     ap.add_argument("--gen-workers", type=int, default=0,
@@ -828,6 +859,7 @@ def main(argv: list[str]) -> int:
         _checkpoint_path=args.checkpoint,
         _no_gen=args.no_gen,
         kimi_key=args.kimi_key,
+        bailian_key=args.bailian_key,
     )
     print("\n=== Summary ===", flush=True)
     for k, v in report.items():
