@@ -183,6 +183,35 @@ def _try_key_chain(callable_fn, max_attempts: int = 3) -> Any | None:
 # ── API call helpers ──────────────────────────────────────
 
 
+# URL patterns for promo/service/payment images in product descriptions.
+# These are unrelated to the product and should be deleted, not regenerated.
+PROMO_URL_PATTERNS = [
+    r"paybtn",              # payment buttons (e.g. tia-0-sportscar2green-paybtn.gif)
+    r"pay[_-]?button",
+    r"service[_-]?icon",
+    r"customer[_-]?service",
+    r"kefu",                # 客服 (customer service)
+    r"qrcode|qr[_-]?code",
+    r"banner[_-]?promo",
+    r"coupon|manjian|quan", # 满减优惠券
+    r"after[_-]?sale",
+    r"warranty",
+    r"ibay365\.cn:\d+",     # ibay365 dynamic service images
+    r"itemtplimg",          # template images (service templates)
+    r"logo\.gif|logo\.png", # standalone logo files
+]
+
+_PROMO_RE = re.compile("|".join(PROMO_URL_PATTERNS), re.IGNORECASE)
+
+
+def _is_promo_url(url: str) -> bool:
+    """Heuristic: detect promo/service/payment images by URL pattern.
+    Used as a fallback when vision audit fails to identify them."""
+    if not url:
+        return False
+    return bool(_PROMO_RE.search(url))
+
+
 def vision_audit(url: str, agnes_key: str, timeout: int = 60,
                  ark_key: str = "") -> dict:
     """Audit a single image by URL. No local download — sends URL directly.
@@ -488,8 +517,12 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
         for f in as_completed(fut):
             audits[fut[f]] = f.result()
 
-    def classify(a: dict, source: str) -> str:
-        """Classify an image. `delete` ONLY applies to desc(C) column images."""
+    def classify(a: dict, source: str, url: str = "") -> str:
+        """Classify an image. `delete` ONLY applies to desc(C) column images.
+        URL pattern matching catches promo/service images even when vision audit fails."""
+        # URL pattern: detect promo/service/payment images by URL heuristics
+        if source == "desc" and url and _is_promo_url(url):
+            return "delete"
         needs_clean = (a.get("needs_cleaning") or a.get("has_brand_name")
                        or a.get("has_logo") or a.get("has_watermark")
                        or a.get("has_chinese_text"))
@@ -507,7 +540,7 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
             if u not in url_source or url_source[u] == "desc":
                 url_source[u] = s
 
-    decisions = {url: classify(audits.get(url, {}), url_source.get(url, "desc"))
+    decisions = {url: classify(audits.get(url, {}), url_source.get(url, "desc"), url)
                  for url in all_urls}
     n_del = sum(1 for d in decisions.values() if d == "delete")
     n_regen = sum(1 for d in decisions.values() if d == "regen")
