@@ -1,29 +1,45 @@
 # AGENTS.md - tk-vn-product-sheet-skill
 
-## 用途
+## 两种工作流
 
-处理 TikTok 越南站商品表格：确定性清洗 + AI 翻译 + 图像清洗。
-
-## 默认工作流
+### 飞书模式（推荐）
 
 ```bash
-python scripts/batch_process.py "<xlsx>" --hfsy-key $HFSY_API_KEY --doubao-key $ARK_API_KEY --agnes-key $AGNES_API_KEY
+python tkvn.py process "input.xlsx" --kimi-key $KIMI_API_KEY --no-gen
+python tkvn.py push-regen work_auto.json -t <token> -i <table>
+# 飞书 AI 字段捷径处理图片后
+python tkvn.py pull-regen work_auto.json -t <token> -i <table>
+python tkvn.py finalize "input.xlsx" work_auto.json "output.xlsx"
 ```
 
-## 分步工作流
+### 本地生图模式
 
 ```bash
-python scripts/run_pipeline.py prepare "<xlsx>" work.json
-# 编辑 work.json
-python scripts/run_pipeline.py finalize "<xlsx>" work.json "output.xlsx"
+python tkvn.py process "input.xlsx" \
+  --kimi-key $KIMI_API_KEY --hfsy-key "K1,K2" --workers 50
 ```
+
+## 关键文件
+
+- `tkvn.py` — CLI 统一入口
+- `scripts/batch_process.py` — 全自动流水线核心
+- `scripts/run_pipeline.py` — 分步编排（prepare/finalize）
+- `scripts/sheet_io.py` — 列映射（动态头检测）
+- `scripts/push_regen_to_feishu.py` — 推送 URL 到飞书
+- `scripts/pull_regen_from_feishu.py` — 从飞书拉取新 URL
+- `scripts/check_sheet.py` — 校验
+- `references/vietnamese-style.md` — 翻译规范
+- `references/image-rules.md` — 图像分类规则
+- `references/field-mapping.md` — 列映射参考
+
+## 视觉审计
+
+4 层回退：Kimi → 百炼 Qwen-VL → minimax-m3 → agnes-2.0-flash
 
 ## 验证
 
 ```bash
-python scripts/check_sheet.py "output.xlsx" brand_set
-python scripts/check_sheet.py "output.xlsx" stock_set
-python scripts/check_sheet.py "output.xlsx" video_cleared
-python scripts/check_sheet.py "output.xlsx" sku_format
-python scripts/check_sheet.py "output.xlsx" image_urls_https
+python tkvn.py check "output.xlsx" brand_set
+python tkvn.py check "output.xlsx" sku_format
+python tkvn.py eval
 ```
