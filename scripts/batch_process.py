@@ -782,7 +782,14 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
             for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
                                   ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
                 if vi.get(key_name):
-                    tr[col] = vi[key_name]
+                    val = vi[key_name]
+                    if col in ("H", "J", "L"):  # 变种属性值 ≤50字符
+                        val = val[:50]
+                    elif col in ("G", "I", "K"):  # 变种属性名 ≤50字符
+                        val = val[:50]
+                    elif col == "B":  # 标题 ≤80字符
+                        val = val[:80]
+                    tr[col] = val
             result = {"row_index": row["row_index"], "translate": tr, "desc_text_vi": vi.get("desc_text", "")}
             cached = {"tr": tr, "dv": vi.get("desc_text", "")}
             with _trans_lock:
