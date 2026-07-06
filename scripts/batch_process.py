@@ -717,47 +717,19 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     all_urls = list(unique_urls.keys())
     print(f"   {len(all_urls)} unique images across {len(w['rows'])} rows", flush=True)
 
-    # Step 2: Vision audit (batch mode for Kimi, parallel for others)
-    print(f"[2/5] Vision audit (batch mode)...", flush=True)
+    # Step 2: Vision audit (parallel with cached base64)
+    print(f"[2/5] Vision audit ({audit_workers} parallel, cached base64)...", flush=True)
     audits: dict[str, dict] = {}
-
-    if kimi_key:
-        # Batch audit: 4 images per Kimi API call, parallel batches
-        batches = [all_urls[i:i + BATCH_SIZE] for i in range(0, len(all_urls), BATCH_SIZE)]
-        print(f"   {len(batches)} batches of up to {BATCH_SIZE} images via Kimi...", flush=True)
-        _audit_lock = threading.Lock()
+    with ThreadPoolExecutor(max_workers=audit_workers) as ex:
+        fut = {ex.submit(vision_audit, url, agnes_key, 60, ark_key, kimi_key, bailian_key): url for url in all_urls}
+        _audit_start = time.monotonic()
         _audit_done = 0
-
-        def _audit_batch(urls_batch: list[str]) -> None:
-            nonlocal _audit_done
-            batch_result = vision_audit_batch(urls_batch, kimi_key=kimi_key)
+        _audit_lock = threading.Lock()
+        for f in as_completed(fut):
+            audits[fut[f]] = f.result()
             with _audit_lock:
-                if batch_result:
-                    audits.update(batch_result)
-                    _audit_done += len(batch_result)
-                else:
-                    _audit_done += 0  # no partial count
-            # Fall back to single-audit for any URLs not returned
-            for url in urls_batch:
-                if url not in audits:
-                    single = vision_audit(url, agnes_key, 60, ark_key, kimi_key, bailian_key)
-                    with _audit_lock:
-                        audits[url] = single
-                        _audit_done += 1
-
-        with ThreadPoolExecutor(max_workers=min(8, len(batches))) as ex:
-            fut = {ex.submit(_audit_batch, b): i for i, b in enumerate(batches)}
-            _batch_start = time.monotonic()
-            for f in as_completed(fut):
-                f.result()  # propagate exceptions
-                elapsed = time.monotonic() - _batch_start
-                done = sum(1 for ff in fut if ff.done())
-                _print_progress(done, len(batches), elapsed, "audit")
-    else:
-        with ThreadPoolExecutor(max_workers=audit_workers) as ex:
-            fut = {ex.submit(vision_audit, url, agnes_key, 60, ark_key, "", bailian_key): url for url in all_urls}
-            for f in as_completed(fut):
-                audits[fut[f]] = f.result()
+                _audit_done += 1
+                _print_progress(_audit_done, len(all_urls), time.monotonic() - _audit_start, "audit")
 
     # Write weight/dimensions extracted by vision audit back into work.json images
     for row in w["rows"]:

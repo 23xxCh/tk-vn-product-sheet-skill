@@ -167,9 +167,10 @@ def main(argv: list[str]) -> int:
         pull_mod = importlib.import_module("pull_regen_from_feishu")
         rp_mod = importlib.import_module("run_pipeline")
 
+        total = report["pushed"]
+
         print(f"\n[auto] Polling Feishu every {args.poll_interval}s (timeout {args.poll_timeout}s)...",
               flush=True)
-        total = report["pushed"]
         elapsed = 0
         while elapsed < args.poll_timeout:
             time.sleep(args.poll_interval)
@@ -214,7 +215,8 @@ def _count_ready(base_token: str, table_id: str, as_identity: str = "user") -> i
                                 encoding="utf-8", errors="replace", timeout=15)
         d = json.loads(result.stdout).get("data", {})
         rows = d.get("data", [])
-        return sum(1 for r in rows if len(r) > 0 and isinstance(r[0], str) and r[0])
+        # Check 图片转链接 field (index 1 in the search result)
+        return sum(1 for r in rows if len(r) > 1 and isinstance(r[1], str) and r[1])
     except Exception:
         return 0
 
