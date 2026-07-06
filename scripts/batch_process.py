@@ -740,7 +740,7 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                 trans[row["row_index"]] = result
             return cached
 
-        with ThreadPoolExecutor(max_workers=audit_workers) as ex:
+        with ThreadPoolExecutor(max_workers=min(4, audit_workers)) as ex:
             list(ex.map(_translate_row_rr, w["rows"]))
         for row in w["rows"]:
             t = trans.get(row["row_index"])
