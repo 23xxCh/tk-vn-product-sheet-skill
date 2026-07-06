@@ -766,34 +766,50 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                 with _trans_lock:
                     trans[row["row_index"]] = {"row_index": row["row_index"], "translate": {}, "desc_text_vi": ""}
                 return {}
-            # Dedup: skip API call if same text was already translated
-            cache_key = json.dumps(src, ensure_ascii=False, sort_keys=True)
+            # Per-field cache: deduplicate individual fields across rows
+            # Same title in different rows (with different variants) → cached
+            _uncached_src = {}
             with _trans_lock:
-                if cache_key in _trans_cache:
-                    cached = _trans_cache[cache_key]
-                    trans[row["row_index"]] = {"row_index": row["row_index"], "translate": cached["tr"], "desc_text_vi": cached["dv"]}
-                    return cached
-            # Not cached, call API
-            key = _rr_trans.next_key() or ark_key
-            vi = translate_batch(src, key, kimi_key=kimi_key)
+                for key_name in src:
+                    field_key = f"{key_name}:{src[key_name]}"
+                    if field_key in _trans_cache:
+                        pass  # already cached
+                    else:
+                        _uncached_src[key_name] = src[key_name]
+            # Full-row cache check (all fields cached → skip API entirely)
+            if not _uncached_src:
+                pass  # all cached, tr built below
+            else:
+                key = _rr_trans.next_key() or ark_key
+                vi = translate_batch(_uncached_src, key, kimi_key=kimi_key)
+                with _trans_lock:
+                    for key_name in _uncached_src:
+                        field_key = f"{key_name}:{_uncached_src[key_name]}"
+                        _trans_cache[field_key] = vi.get(key_name, "")
+            # Build translation result from cache
             tr = {}
             for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
                                   ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
-                if vi.get(key_name):
-                    val = vi[key_name]
-                    if col in ("H", "J", "L"):  # 变种属性值 ≤50字符
-                        val = val[:50]
-                    elif col in ("G", "I", "K"):  # 变种属性名 ≤50字符
-                        val = val[:50]
-                    elif col == "B":  # 标题 ≤80字符
-                        val = val[:80]
-                    tr[col] = val
-            result = {"row_index": row["row_index"], "translate": tr, "desc_text_vi": vi.get("desc_text", "")}
-            cached = {"tr": tr, "dv": vi.get("desc_text", "")}
+                if key_name in src:
+                    field_key = f"{key_name}:{src[key_name]}"
+                    with _trans_lock:
+                        val = _trans_cache.get(field_key, "")
+                    if val:
+                        if col in ("H", "J", "L"):
+                            val = val[:50]
+                        elif col in ("G", "I", "K"):
+                            val = val[:50]
+                        elif col == "B":
+                            val = val[:80]
+                        tr[col] = val
+            dv = ""
+            if "desc_text" in src:
+                with _trans_lock:
+                    dv = _trans_cache.get(f"desc_text:{src['desc_text']}", "")
+            result = {"row_index": row["row_index"], "translate": tr, "desc_text_vi": dv}
             with _trans_lock:
-                _trans_cache[cache_key] = cached
                 trans[row["row_index"]] = result
-            return cached
+            return {"tr": tr, "dv": dv}
 
         with ThreadPoolExecutor(max_workers=min(4, audit_workers)) as ex:
             list(ex.map(_translate_row_rr, w["rows"]))
