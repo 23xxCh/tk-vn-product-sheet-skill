@@ -193,7 +193,7 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
         # physical attrs (weight extraction disabled - unreliable)
 
     # --- column cleanup: 删「本地展示价」空列 + 「价格(站点币种)」改名「本地展示价」 ---
-    # 按标题定位,不硬编码列号(先删空列可能改变列号,所以先找再删)
+    # 按标题定位,不硬编码列号
     header_row = 1
     price_col = None
     local_price_col = None
@@ -203,22 +203,13 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
             price_col = c
         if h == "本地展示价" or h.startswith("本地展示价"):
             local_price_col = c
-    # 只删除「本地展示价」空列(所有数据行该列都为空才删)
-    if local_price_col and local_price_col != price_col:
-        col_empty = all(
-            ws.cell(row=r, column=local_price_col).value in (None, "")
-            for r in range(2, ws.max_row + 1)
-        )
-        if col_empty:
-            ws.delete_cols(local_price_col, 1)
-            if price_col and price_col > local_price_col:
-                price_col -= 1
-        # 如果列非空(有价格数据),不删除,直接改名为本地展示价
-        else:
-            price_col = local_price_col
-    # 「价格(站点币种)」标题改名为「本地展示价」
+    # 不删列(删列会导致列错位,img["col"]失效)
+    # 只改名: 价格(站点币种)→本地展示价; 空的本地展示价列清空列头
     if price_col:
         ws.cell(row=header_row, column=price_col).value = "本地展示价"
+    if local_price_col and local_price_col != price_col:
+        # 清空多余的本地展示价列(不删,避免错位)
+        ws.cell(row=header_row, column=local_price_col).value = ""
 
     # Clean weight column: 0, non-numeric → None; strings → float
     if COL.get("weight"):
