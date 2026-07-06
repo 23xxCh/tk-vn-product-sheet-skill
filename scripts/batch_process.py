@@ -457,6 +457,8 @@ def vision_audit_batch(urls: list[str], kimi_key: str = "",
         pass
     return {}  # batch failed — caller falls back to single-image audit
 
+_IMG_CACHE_DIR: Path | None = None
+
 def _ensure_cache_dir() -> Path:
     global _IMG_CACHE_DIR
     if _IMG_CACHE_DIR is None:
@@ -514,6 +516,35 @@ def _to_data_uri_cached(url: str, max_retries: int = 3, timeout: int = 30) -> st
         except OSError:
             pass
     return data_uri
+
+
+# ── Audit result cache (determinism: same URL → same audit result) ──────────
+
+_AUDIT_CACHE: dict[str, dict] = {}
+_AUDIT_CACHE_PATH: str | None = None
+
+
+def _load_audit_cache() -> dict[str, dict]:
+    global _AUDIT_CACHE, _AUDIT_CACHE_PATH
+    if _AUDIT_CACHE_PATH is None:
+        _AUDIT_CACHE_PATH = str(_ensure_cache_dir() / "_audit_cache.json")
+    if _AUDIT_CACHE:
+        return _AUDIT_CACHE
+    try:
+        if Path(_AUDIT_CACHE_PATH).exists():
+            _AUDIT_CACHE = json.loads(Path(_AUDIT_CACHE_PATH).read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        _AUDIT_CACHE = {}
+    return _AUDIT_CACHE
+
+
+def _save_audit_cache() -> None:
+    if _AUDIT_CACHE_PATH and _AUDIT_CACHE:
+        try:
+            Path(_AUDIT_CACHE_PATH).write_text(
+                json.dumps(_AUDIT_CACHE, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
 
 
 def nano_gen(url: str, key: str, size: str = "4K", timeout: int = 300) -> str | None:
@@ -732,29 +763,40 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     all_urls = list(unique_urls.keys())
     print(f"   {len(all_urls)} unique images across {len(w['rows'])} rows", flush=True)
 
-    # Step 2: Vision audit (parallel with cached base64)
-    print(f"[2/5] Vision audit ({audit_workers} parallel, cached base64)...", flush=True)
+    # Step 2: Vision audit (parallel with cached base64 + result cache)
+    print(f"[2/5] Vision audit ({audit_workers} parallel, cached)...", flush=True)
     audits: dict[str, dict] = {}
+    _audit_cache = _load_audit_cache()
+    cache_hits = 0
     # Pre-classify already-cleaned URLs (sd2oss/coze) to skip audit entirely
     audit_urls = []
     for url in all_urls:
         if _is_already_cleaned_url(url):
             audits[url] = {"needs_cleaning": False, "cleaning_reason": "none", "is_promo_banner": False}
+        elif url in _audit_cache:
+            audits[url] = _audit_cache[url]
+            cache_hits += 1
         else:
             audit_urls.append(url)
+    if cache_hits:
+        print(f"   {cache_hits} audit cache hits (deterministic)", flush=True)
     skipped = len(all_urls) - len(audit_urls)
-    if skipped:
-        print(f"   {skipped} already-cleaned URLs skipped (no audit needed)", flush=True)
+    if skipped > cache_hits:
+        print(f"   {skipped - cache_hits} already-cleaned URLs skipped", flush=True)
     with ThreadPoolExecutor(max_workers=audit_workers) as ex:
         fut = {ex.submit(vision_audit, url, agnes_key, 60, ark_key, kimi_key, bailian_key): url for url in audit_urls}
         _audit_start = time.monotonic()
         _audit_done = 0
         _audit_lock = threading.Lock()
         for f in as_completed(fut):
-            audits[fut[f]] = f.result()
+            result = f.result()
+            url = fut[f]
+            audits[url] = result
+            _audit_cache[url] = result  # cache for determinism
             with _audit_lock:
                 _audit_done += 1
-                _print_progress(_audit_done, len(all_urls), time.monotonic() - _audit_start, "audit")
+                _print_progress(_audit_done, len(audit_urls), time.monotonic() - _audit_start, "audit")
+    _save_audit_cache()
 
     # Write weight/dimensions extracted by vision audit back into work.json images
     for row in w["rows"]:
