@@ -160,19 +160,12 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
         desc_delete: set[str] = set()
         desc_replace: dict[str, str] = {}
         collected_weight = None
-        collected_l = collected_w = collected_h = None
         for img in row["images"]:
             dec = (img.get("decision") or "").lower()
             orig = img["orig"]
             new_url = img.get("new_url") or ""
             if img.get("weight_kg") is not None:
                 collected_weight = img["weight_kg"]
-            if img.get("l") is not None:
-                collected_l = img["l"]
-            if img.get("w") is not None:
-                collected_w = img["w"]
-            if img.get("h") is not None:
-                collected_h = img["h"]
 
             if dec == "keep":
                 continue
@@ -203,12 +196,6 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
         # physical attrs
         if collected_weight is not None:
             ws.cell(row=r, column=sheet_io.col_idx(COL["weight"])).value = round(float(collected_weight), 3)
-        if collected_l is not None:
-            ws.cell(row=r, column=sheet_io.col_idx(COL["length"])).value = collected_l
-        if collected_w is not None:
-            ws.cell(row=r, column=sheet_io.col_idx(COL["width"])).value = collected_w
-        if collected_h is not None:
-            ws.cell(row=r, column=sheet_io.col_idx(COL["height"])).value = collected_h
 
     # --- column cleanup: 删「本地展示价」空列 + 「价格(站点币种)」改名「本地展示价」 ---
     # 按标题定位,不硬编码列号(先删空列可能改变列号,所以先找再删)

@@ -45,9 +45,7 @@ AUDIT_SYSTEM = (
     '{"has_brand_name":bool,"brand_names_found":[],"has_logo":bool,'
     '"has_watermark":bool,"has_chinese_text":bool,"has_text":bool,"text_type":"english|chinese|mixed|none",'
     '"is_promo_banner":bool,'
-    '"needs_cleaning":bool,"cleaning_reason":"brand|logo|watermark|text|promo|none",'
-    '"weight_kg":null,"length_cm":null,"width_cm":null,"height_cm":null}'
-    "\nIf weight/dimensions text is visible, extract and convert to kg/cm. null if not found."
+    '"needs_cleaning":bool,"cleaning_reason":"brand|logo|watermark|text|promo|none"}'
     "\nhas_text=true if the image contains ANY text (Chinese, English, or mixed) that should be translated to Vietnamese."
     "\nFor product description images, mark needs_cleaning=true if has_text=true (need Vietnamese translation)."
 )
@@ -854,31 +852,6 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                 _audit_done += 1
                 _print_progress(_audit_done, len(audit_urls), time.monotonic() - _audit_start, "audit")
     _save_audit_cache()
-
-    # Write weight/dimensions extracted by vision audit back into work.json images
-    for row in w["rows"]:
-        for img in row["images"]:
-            a = audits.get(img["orig"], {})
-            if a.get("weight_kg") is not None:
-                try:
-                    img["weight_kg"] = float(a["weight_kg"])
-                except (ValueError, TypeError):
-                    pass
-            if a.get("length_cm") is not None:
-                try:
-                    img["l"] = float(a["length_cm"])
-                except (ValueError, TypeError):
-                    pass
-            if a.get("width_cm") is not None:
-                try:
-                    img["w"] = float(a["width_cm"])
-                except (ValueError, TypeError):
-                    pass
-            if a.get("height_cm") is not None:
-                try:
-                    img["h"] = float(a["height_cm"])
-                except (ValueError, TypeError):
-                    pass
 
     def classify(a: dict, source: str, url: str = "") -> str:
         """Classify an image. `delete` ONLY applies to desc(C) column images.
