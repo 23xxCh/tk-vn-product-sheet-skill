@@ -78,7 +78,8 @@ TRANSLATE_SYSTEM = (
     "营销废话精简: '甄选皮革耐用十年'→da cao cấp, bền bỉ\n\n"
     "## 描述文字(desc_text)规则\n"
     "删品牌名(具体品牌改成通用词), 译越南语, 保留<p><br>等HTML标签。\n\n"
-    "只输出JSON, 键与输入完全一致, 值为越南语译文。空值保持空。"
+    "只输出JSON, 键与输入完全一致, 值为纯越南语译文。空值保持空。\n"
+    "重要: 输出不得残留任何中文字符。如果原文包含中文,必须全部翻译成越南语。"
 )
 
 
@@ -778,7 +779,10 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                     vi = translate_batch(_uncached_src, key, kimi_key=kimi_key)
                     for key_name in _uncached_src:
                         field_key = f"{key_name}:{_uncached_src[key_name]}"
-                        _trans_cache[field_key] = vi.get(key_name, "")
+                        val = vi.get(key_name, "")
+                        if val:
+                            val = re.sub(r'[一-鿿]+', '', val).strip()
+                        _trans_cache[field_key] = val
                 # Build result from cache
                 tr = {}
                 for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
@@ -786,6 +790,7 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                     if key_name in src:
                         val = _trans_cache.get(f"{key_name}:{src[key_name]}", "")
                         if val:
+                            val = re.sub(r'[一-鿿]+', '', val).strip()
                             if col in ("H", "J", "L"): val = val[:50]
                             elif col in ("G", "I", "K"): val = val[:50]
                             elif col == "B": val = val[:80]
