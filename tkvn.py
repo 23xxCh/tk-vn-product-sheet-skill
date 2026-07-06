@@ -99,6 +99,18 @@ def cmd_eval(_: argparse.Namespace) -> int:
     return mod.main([])
 
 
+def cmd_rollback(args: argparse.Namespace) -> int:
+    import shutil
+    xlsx = Path(args.xlsx)
+    bak = xlsx.with_suffix(xlsx.suffix + ".bak")
+    if not bak.exists():
+        print(f"No backup found: {bak}", flush=True)
+        return 1
+    shutil.copy2(str(bak), str(xlsx))
+    print(f"Restored: {xlsx} <- {bak}", flush=True)
+    return 0
+
+
 def cmd_push_regen(args: argparse.Namespace) -> int:
     mod = importlib.import_module("push_regen_to_feishu")
     argv = [args.work_json, "--base-token", args.base_token, "--table-id", args.table_id]
@@ -198,6 +210,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # eval
     sub.add_parser("eval", help="运行评测").set_defaults(fn=cmd_eval)
+
+    # rollback
+    p = sub.add_parser("rollback", help="从.bak恢复原文件")
+    p.add_argument("xlsx", help="要恢复的xlsx文件（自动找同名.bak）")
+    p.set_defaults(fn=cmd_rollback)
 
     # push-regen
     p = sub.add_parser("push-regen", help="推送需重新生成的图片URL到飞书多维表格")

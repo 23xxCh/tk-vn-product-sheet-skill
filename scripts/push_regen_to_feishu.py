@@ -171,7 +171,11 @@ def main(argv: list[str]) -> int:
 
         print(f"\n[auto] Polling Feishu every {args.poll_interval}s (timeout {args.poll_timeout}s)...",
               flush=True)
-        elapsed = 0
+        print(f"      Open table to monitor: https://ocn7fqpywl76.feishu.cn/base/Ul09bdXjwaodHVsYdNVcGJs3noc",
+              flush=True)
+        # Brief delay before first poll (Feishu indexing)
+        time.sleep(5)
+        elapsed = 5
         while elapsed < args.poll_timeout:
             time.sleep(args.poll_interval)
             elapsed += args.poll_interval

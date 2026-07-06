@@ -416,7 +416,10 @@ def vision_audit(url: str, agnes_key: str, timeout: int = 60,
             return json.loads(m.group(0))
     except Exception:
         pass
-    # On total failure, conservatively assume needs cleaning (safer for IP)
+    # On total failure: for signed/expired URLs, assume clean (already processed)
+    if "Expires=" in url or "Signature=" in url or "X-Amz" in url:
+        return {"needs_cleaning": False, "cleaning_reason": "signed_url_skip", "is_promo_banner": False}
+    # For other URLs, conservatively assume needs cleaning (safer for IP)
     return {"needs_cleaning": True, "cleaning_reason": "unknown", "is_promo_banner": False}
 
 
@@ -696,10 +699,44 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     xlsx = Path(xlsx_path).resolve()
     work = Path(work_path or xlsx.with_name("work_auto.json")).resolve()
 
+    # Check if work.json already has results (resume mode)
+    _existing = None
+    if work.exists():
+        try:
+            _existing = json.loads(work.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
     # Step 1: prepare (fast, <1s)
     print("[1/5] Prepare (deterministic transforms)...", flush=True)
     rp_prepare(str(xlsx), str(work))
     w = json.loads(work.read_text(encoding="utf-8"))
+
+    # Resume: copy translations and image decisions from existing work.json
+    if _existing and _existing.get("rows"):
+        _existing_by_row = {r["row_index"]: r for r in _existing["rows"]}
+        _resumed_tr = 0
+        _resumed_imgs = 0
+        for row in w["rows"]:
+            ri = row["row_index"]
+            if ri in _existing_by_row:
+                old = _existing_by_row[ri]
+                if old.get("translate"):
+                    row["translate"] = old["translate"]
+                    row["desc_text_vi"] = old.get("desc_text_vi", "")
+                    _resumed_tr += 1
+                # Resume image decisions for matching URLs
+                _old_imgs = {img.get("orig",""): img for img in old.get("images", [])}
+                for img in row["images"]:
+                    oi = _old_imgs.get(img["orig"], {})
+                    if oi.get("decision"):
+                        img["decision"] = oi["decision"]
+                        img["new_url"] = oi.get("new_url", "")
+                        _resumed_imgs += 1
+        if _resumed_tr:
+            print(f"   [resume] restored {_resumed_tr} row translations", flush=True)
+        if _resumed_imgs:
+            print(f"   [resume] restored {_resumed_imgs} image decisions", flush=True)
 
     # Step 1b: 自动翻译 (标题/变种/描述文字 → 越南语, 去品牌). 一次一行, 并发.
     print(f"[1b] Auto-translate titles/variants/desc ({audit_workers} parallel)...", flush=True)

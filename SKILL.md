@@ -148,6 +148,12 @@ AGNES_API_KEY=xxx      # agnes-2.0-flash（视觉审计最后备用）
 - `gw.alicdn.com` 图片防盗链，需多 UA/Referer 重试下载转 base64。
 - Excel 锁：`wb.save()` 等 10 次重试，失败存 `_final` 后缀文件。
 
+## 其他命令
+
+```bash
+python tkvn.py rollback "表格.xlsx"     # 从.bak恢复（撤销finalize）
+```
+
 ## 评测
 
 ```bash
@@ -155,3 +161,13 @@ python tkvn.py eval
 ```
 
 黄金用例在 `evals/` 目录下（case1-5）。
+
+## 确定性保证
+
+- **审计缓存** `_audit_cache.json` — 同一URL永远返回同一结果
+- **翻译缓存** `_trans_cache` — 同一文本永远返回同一译文  
+- **base64缓存** `_img_cache/` — 下载过的图不再重下
+- **work.json resume** — 重新process自动复用上次审计翻译结果
+- **已处理图跳过** — hfsyapi/coze/~crop URL 直接keep
+- **URL模式检测** — 促销图/paybtn/service 正则直接delete
+
