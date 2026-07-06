@@ -766,48 +766,32 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                 with _trans_lock:
                     trans[row["row_index"]] = {"row_index": row["row_index"], "translate": {}, "desc_text_vi": ""}
                 return {}
-            # Per-field cache: deduplicate individual fields across rows
-            # Same title in different rows (with different variants) → cached
-            _uncached_src = {}
+            # Per-field cache with lock: no races, same text → same translation
             with _trans_lock:
+                _uncached_src = {}
                 for key_name in src:
                     field_key = f"{key_name}:{src[key_name]}"
-                    if field_key in _trans_cache:
-                        pass  # already cached
-                    else:
+                    if field_key not in _trans_cache:
                         _uncached_src[key_name] = src[key_name]
-            # Full-row cache check (all fields cached → skip API entirely)
-            if not _uncached_src:
-                pass  # all cached, tr built below
-            else:
-                key = _rr_trans.next_key() or ark_key
-                vi = translate_batch(_uncached_src, key, kimi_key=kimi_key)
-                with _trans_lock:
+                if _uncached_src:
+                    key = _rr_trans.next_key() or ark_key
+                    vi = translate_batch(_uncached_src, key, kimi_key=kimi_key)
                     for key_name in _uncached_src:
                         field_key = f"{key_name}:{_uncached_src[key_name]}"
                         _trans_cache[field_key] = vi.get(key_name, "")
-            # Build translation result from cache
-            tr = {}
-            for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
-                                  ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
-                if key_name in src:
-                    field_key = f"{key_name}:{src[key_name]}"
-                    with _trans_lock:
-                        val = _trans_cache.get(field_key, "")
-                    if val:
-                        if col in ("H", "J", "L"):
-                            val = val[:50]
-                        elif col in ("G", "I", "K"):
-                            val = val[:50]
-                        elif col == "B":
-                            val = val[:80]
-                        tr[col] = val
-            dv = ""
-            if "desc_text" in src:
-                with _trans_lock:
-                    dv = _trans_cache.get(f"desc_text:{src['desc_text']}", "")
-            result = {"row_index": row["row_index"], "translate": tr, "desc_text_vi": dv}
-            with _trans_lock:
+                # Build result from cache
+                tr = {}
+                for key_name, col in [("title", "B"), ("vname1", "G"), ("vval1", "H"),
+                                      ("vname2", "I"), ("vval2", "J"), ("vname3", "K"), ("vval3", "L")]:
+                    if key_name in src:
+                        val = _trans_cache.get(f"{key_name}:{src[key_name]}", "")
+                        if val:
+                            if col in ("H", "J", "L"): val = val[:50]
+                            elif col in ("G", "I", "K"): val = val[:50]
+                            elif col == "B": val = val[:80]
+                            tr[col] = val
+                dv = _trans_cache.get(f"desc_text:{src.get('desc_text','')}", "") if "desc_text" in src else ""
+                result = {"row_index": row["row_index"], "translate": tr, "desc_text_vi": dv}
                 trans[row["row_index"]] = result
             return {"tr": tr, "dv": dv}
 
