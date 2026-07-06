@@ -490,7 +490,7 @@ def _ensure_cache_dir() -> Path:
 
 def _to_data_uri(url: str, max_retries: int = 3, timeout: int = 30) -> str | None:
     """Download image and return base64 data URI (for gw.alicdn that blocks API fetch).
-    Retries with different User-Agent on failure."""
+    Retries with different User-Agent on failure. Distinguishes 4xx (no retry) from network errors."""
     agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -513,26 +513,41 @@ def _to_data_uri(url: str, max_retries: int = 3, timeout: int = 30) -> str | Non
             r = requests.get(url, **kwargs)
             if r.status_code == 200:
                 return f"data:image/jpeg;base64,{base64.b64encode(r.content).decode()}"
-            if r.status_code in (403, 429):
+            # 401/403/404: auth/permission/not-found — no point retrying, return None fast
+            if r.status_code in (401, 403, 404):
+                return None
+            # 429/5xx: rate-limited or transient — retry with backoff
+            if r.status_code == 429 or r.status_code >= 500:
                 time.sleep(0.5 * (attempt + 1))
                 continue
+            # Other HTTP statuses: no retry
             return None
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            # Network errors: retry with backoff
+            if attempt < max_retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+            continue
         except Exception:
+            # Unexpected errors: retry once then give up
             if attempt < max_retries - 1:
                 time.sleep(0.5 * (attempt + 1))
     return None
 
 def _to_data_uri_cached(url: str, max_retries: int = 3, timeout: int = 30) -> str | None:
     """Download image to base64, caching to _img_cache/ by URL hash.
-    Cached entries are immutable — once cached, never re-download."""
-    cache_file = _ensure_cache_dir() / f"{hashlib.md5(url.encode()).hexdigest()}.b64"
-    if cache_file.exists():
-        try:
-            return cache_file.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            cache_file.unlink(missing_ok=True)
+    Signed URLs (with Expires=/Signature=) are NOT cached — they expire and
+    the same hash would mask a refreshed URL pointing to different content."""
+    # Skip cache for signed/expiring URLs
+    is_signed = "Expires=" in url or "Signature=" in url or "X-Amz" in url
+    if not is_signed:
+        cache_file = _ensure_cache_dir() / f"{hashlib.md5(url.encode()).hexdigest()}.b64"
+        if cache_file.exists():
+            try:
+                return cache_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                cache_file.unlink(missing_ok=True)
     data_uri = _to_data_uri(url, max_retries, timeout)
-    if data_uri:
+    if data_uri and not is_signed:
         try:
             cache_file.write_text(data_uri, encoding="utf-8")
         except OSError:

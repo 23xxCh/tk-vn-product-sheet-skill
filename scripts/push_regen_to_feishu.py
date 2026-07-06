@@ -145,6 +145,8 @@ def main(argv: list[str]) -> int:
                     help="Poll Feishu until images ready, then auto pull-regen + finalize")
     ap.add_argument("--input-xlsx", help="Original xlsx to finalize (required with --auto-finalize)")
     ap.add_argument("--output-xlsx", help="Output xlsx (default: <input>_processed.xlsx)")
+    ap.add_argument("--new-field", default="图片转链接",
+                    help="Field the Feishu AI shortcut writes the cleaned URL to (default: 图片转链接)")
     ap.add_argument("--poll-interval", type=int, default=10,
                     help="Seconds between poll checks (default: 10)")
     ap.add_argument("--poll-timeout", type=int, default=600,
@@ -171,7 +173,8 @@ def main(argv: list[str]) -> int:
 
         print(f"\n[auto] Polling Feishu every {args.poll_interval}s (timeout {args.poll_timeout}s)...",
               flush=True)
-        print(f"      Open table to monitor: https://ocn7fqpywl76.feishu.cn/base/Ul09bdXjwaodHVsYdNVcGJs3noc",
+        print(f"      Checking field '{args.new_field}' on each record for completion.", flush=True)
+        print(f"      Open table to monitor: https://ocn7fqpywl76.feishu.cn/base/{args.base_token}",
               flush=True)
         # Brief delay before first poll (Feishu indexing)
         time.sleep(5)
@@ -179,14 +182,15 @@ def main(argv: list[str]) -> int:
         while elapsed < args.poll_timeout:
             time.sleep(args.poll_interval)
             elapsed += args.poll_interval
-            ready = _count_ready(args.base_token, args.table_id, args.as_identity)
+            ready = _count_ready(args.base_token, args.table_id, args.as_identity,
+                                 args.field, args.new_field)
             print(f"  {ready}/{total} ready (elapsed {elapsed}s)", flush=True)
             if ready >= total:
                 print("[auto] All images ready! Pulling results...", flush=True)
                 pull_stats = pull_mod.update_work_json(
                     args.work_json,
                     pull_mod.fetch_records(args.base_token, args.table_id,
-                                           args.field, "图片转链接", args.as_identity)
+                                           args.field, args.new_field, args.as_identity)
                 )
                 print(f"  Matched: {pull_stats['matched']}, Unmatched: {pull_stats['unmatched']}",
                       flush=True)
@@ -203,15 +207,17 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-def _count_ready(base_token: str, table_id: str, as_identity: str = "user") -> int:
-    """Count how many records have 图片转链接 field filled."""
+def _count_ready(base_token: str, table_id: str, as_identity: str = "user",
+                 source_field: str = "附件链接", new_field: str = "图片转链接") -> int:
+    """Count how many records have the new_field filled.
+    source_field/new_field must match what push used and the Feishu AI shortcut writes."""
     lark_cli = shutil.which("lark-cli") or "lark-cli"
     cmd = [
         lark_cli, "base", "+record-search",
         "--base-token", base_token, "--table-id", table_id,
         "--as", as_identity,
-        "--keyword", "http", "--search-field", "附件链接",
-        "--field-id", "图片转链接",
+        "--keyword", "http", "--search-field", source_field,
+        "--field-id", new_field,
         "--limit", "200", "--format", "json",
     ]
     try:
@@ -219,8 +225,8 @@ def _count_ready(base_token: str, table_id: str, as_identity: str = "user") -> i
                                 encoding="utf-8", errors="replace", timeout=15)
         d = json.loads(result.stdout).get("data", {})
         rows = d.get("data", [])
-        # Check 图片转链接 field (index 1 in the search result)
-        return sum(1 for r in rows if len(r) > 1 and isinstance(r[1], str) and r[1])
+        # new_field is the single projected field (index 0 in each row)
+        return sum(1 for r in rows if len(r) > 0 and isinstance(r[0], str) and r[0])
     except Exception:
         return 0
 
