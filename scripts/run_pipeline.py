@@ -133,6 +133,46 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
     COL = sheet_io.resolve_columns(ws)
     SUB_COLS = COL["sub_imgs"]
 
+    # --- Pre-step: delete empty "本地展示价" column BEFORE writing data ---
+    # Do this first so column shifts don't corrupt img["col"] mappings
+    deleted_col_idx = None
+    price_col_num = None
+    local_price_col_num = None
+    for c in range(1, ws.max_column + 1):
+        h = str(ws.cell(row=1, column=c).value or "").strip()
+        if h.startswith("价格") or "价格(站点币种)" in h or "价格（站点币种）" in h:
+            price_col_num = c
+        if h == "本地展示价" or h.startswith("本地展示价"):
+            local_price_col_num = c
+    if local_price_col_num and local_price_col_num != price_col_num:
+        col_empty = all(
+            ws.cell(row=r, column=local_price_col_num).value in (None, "")
+            for r in range(2, ws.max_row + 1)
+        )
+        if col_empty:
+            ws.delete_cols(local_price_col_num, 1)
+            deleted_col_idx = local_price_col_num
+            # Re-resolve columns after deletion
+            COL = sheet_io.resolve_columns(ws)
+            SUB_COLS = COL["sub_imgs"]
+    # Rename 价格(站点币种) → 本地展示价
+    if price_col_num:
+        # Adjust price_col_num if it was after the deleted column
+        if deleted_col_idx and price_col_num > deleted_col_idx:
+            price_col_num -= 1
+        ws.cell(row=1, column=price_col_num).value = "本地展示价"
+
+    # Adjust img["col"] in work.json if a column was deleted
+    if deleted_col_idx:
+        from openpyxl.utils import get_column_letter, column_index_from_string
+        for row in work["rows"]:
+            for img in row.get("images", []):
+                old_col = img.get("col", "")
+                if old_col:
+                    old_idx = column_index_from_string(old_col)
+                    if old_idx > deleted_col_idx:
+                        img["col"] = get_column_letter(old_idx - 1)
+
     img_cols = [COL["main_img"]] + SUB_COLS + [COL["variant_img"]]
     for row in work["rows"]:
         r = row["row_index"]
@@ -193,24 +233,6 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
         # physical attrs (weight extraction disabled - unreliable)
 
     # --- column cleanup: 删「本地展示价」空列 + 「价格(站点币种)」改名「本地展示价」 ---
-    # 按标题定位,不硬编码列号
-    header_row = 1
-    price_col = None
-    local_price_col = None
-    for c in range(1, ws.max_column + 1):
-        h = str(ws.cell(row=header_row, column=c).value or "").strip()
-        if h.startswith("价格") or "价格(站点币种)" in h or "价格（站点币种）" in h:
-            price_col = c
-        if h == "本地展示价" or h.startswith("本地展示价"):
-            local_price_col = c
-    # 不删列(删列会导致列错位,img["col"]失效)
-    # 只改名: 价格(站点币种)→本地展示价; 空的本地展示价列清空列头
-    if price_col:
-        ws.cell(row=header_row, column=price_col).value = "本地展示价"
-    if local_price_col and local_price_col != price_col:
-        # 清空多余的本地展示价列(不删,避免错位)
-        ws.cell(row=header_row, column=local_price_col).value = ""
-
     # Clean weight column: 0, non-numeric → None; strings → float
     if COL.get("weight"):
         w_ci = sheet_io.col_idx(COL["weight"])
