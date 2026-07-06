@@ -46,8 +46,15 @@ AUDIT_SYSTEM = (
     '"has_watermark":bool,"has_chinese_text":bool,"has_text":bool,"text_type":"english|chinese|mixed|none",'
     '"is_promo_banner":bool,'
     '"needs_cleaning":bool,"cleaning_reason":"brand|logo|watermark|text|promo|none"}'
-    "\nhas_text=true if the image contains ANY text (Chinese, English, or mixed) that should be translated to Vietnamese."
-    "\nFor product description images, mark needs_cleaning=true if has_text=true (need Vietnamese translation)."
+    "\n检查要求(必须非常仔细):"
+    "\n1. 品牌名: 检查图片所有区域(主图、角落、底部、文字内)是否有任何品牌名,包括IWC/Nike/Adidas/BMW/苹果/HUAWEI/小米/三星/优衣库/ZARA/HM等所有知名/不知名品牌,英文/中文/拼音都算。发现则列出在brand_names_found。"
+    "\n2. Logo: 检查是否有任何logo图标(品牌logo、官方标识、产品logo),包括角落小logo、半透明水印式logo、底色上的产品logo。"
+    "\n3. 水印: 检查是否有任何水印(图片水印、半透明文字、版权标记、防盗水印),包括角落、边缘、背景层。"
+    "\n4. 文字: 检查图中任何文字(中文/英文),包括产品参数、规格、广告语。has_text=true if any text visible。"
+    "\n5. 促销banner: 客服/售后/优惠/优惠券/物流说明图。is_promo_banner=true if not product photo。"
+    "\n任何has_brand_name/has_logo/has_watermark/has_text=true → needs_cleaning=true,reason=对应类型。"
+    "\n描述列图片有文字也一律needs_cleaning=true(需翻译越南语)。"
+    "\n输出不得残留任何中文字符。如果原文包含中文,必须全部翻译成越南语。"
 )
 
 # 批量翻译的 system prompt (标题/变种/描述文字一次性翻译, 去品牌+越南语)
