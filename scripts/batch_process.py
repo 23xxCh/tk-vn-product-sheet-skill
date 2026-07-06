@@ -267,8 +267,14 @@ ALREADY_CLEANED_PATTERNS = [
     r"sd2oss-.*\.oss-.*\.aliyuncs\.com/chatgpt2api",  # hfsyapi regenerated
     r"bot-platform-tos-sign\.coze\.cn",                # Feishu regenerated
 ]
+# Non-product images that should be kept as-is (not audited, not regen'd)
+SKIP_AUDIT_PATTERNS = [
+    r"~crop",             # cropped detail/decoration images
+    r"imgextra.*~",       # Alibaba extra images with transformations
+]
 
 _ALREADY_CLEANED_RE = re.compile("|".join(ALREADY_CLEANED_PATTERNS), re.IGNORECASE)
+_SKIP_AUDIT_RE = re.compile("|".join(SKIP_AUDIT_PATTERNS), re.IGNORECASE)
 
 
 def _is_already_cleaned_url(url: str) -> bool:
@@ -276,6 +282,13 @@ def _is_already_cleaned_url(url: str) -> bool:
     if not url:
         return False
     return bool(_ALREADY_CLEANED_RE.search(url))
+
+
+def _is_skip_audit_url(url: str) -> bool:
+    """Detect non-product images (crops, decorations) that should be kept as-is."""
+    if not url:
+        return False
+    return bool(_SKIP_AUDIT_RE.search(url))
 
 
 def _is_promo_url(url: str) -> bool:
@@ -771,7 +784,7 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     # Pre-classify already-cleaned URLs (sd2oss/coze) to skip audit entirely
     audit_urls = []
     for url in all_urls:
-        if _is_already_cleaned_url(url):
+        if _is_already_cleaned_url(url) or _is_skip_audit_url(url):
             audits[url] = {"needs_cleaning": False, "cleaning_reason": "none", "is_promo_banner": False}
         elif url in _audit_cache:
             audits[url] = _audit_cache[url]
@@ -827,8 +840,8 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
         """Classify an image. `delete` ONLY applies to desc(C) column images.
         URL pattern matching catches promo/service images even when vision audit fails.
         For desc images, any text (Chinese/English) triggers regen for Vietnamese translation."""
-        # Skip audit for already-regenerated images (hfsyapi/feishu output)
-        if url and _is_already_cleaned_url(url):
+        # Skip audit for already-regenerated or non-product images
+        if url and (_is_already_cleaned_url(url) or _is_skip_audit_url(url)):
             return "keep"
         # URL pattern: detect promo/service/payment images by URL heuristics
         if source == "desc" and url and _is_promo_url(url):
