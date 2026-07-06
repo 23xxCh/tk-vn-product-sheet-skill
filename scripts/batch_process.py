@@ -281,10 +281,10 @@ def vision_audit(url: str, agnes_key: str, timeout: int = 60,
     Fallback 3: Agnes 2.0 flash (URL direct).
     Returns structured dict.
     """
-    # --- Primary: Kimi moonshot vision (base64) ---
+    # --- Primary: Kimi moonshot vision (base64, cached) ---
     if kimi_key:
         try:
-            data_uri = _to_data_uri(url)
+            data_uri = _to_data_uri_cached(url)
             if data_uri:
                 resp = requests.post(
                     "https://api.moonshot.cn/v1/chat/completions",
@@ -392,6 +392,63 @@ def vision_audit(url: str, agnes_key: str, timeout: int = 60,
     return {"needs_cleaning": True, "cleaning_reason": "unknown", "is_promo_banner": False}
 
 
+BATCH_SIZE = 4  # images per batch audit API call
+
+BATCH_AUDIT_PROMPT = (
+    AUDIT_SYSTEM + "\n\nYou are auditing MULTIPLE images at once. "
+    "Output a JSON ARRAY with one object per image, in the same order as input. "
+    "Each object MUST have a \"result\" key matching the index (0,1,2,3). "
+    "Example: [{\"result\":0,\"has_brand_name\":false,...},{\"result\":1,...}]"
+)
+
+def vision_audit_batch(urls: list[str], kimi_key: str = "",
+                       timeout: int = 120) -> dict[str, dict]:
+    """Audit up to 4 images in one Kimi API call.
+    Returns {url: audit_dict} mapping. Falls back to single-audit on failure."""
+    if not kimi_key or not urls:
+        return {}
+    try:
+        # Prepare base64 images (use cache)
+        content_parts = [{"type": "text", "text": BATCH_AUDIT_PROMPT}]
+        for i, url in enumerate(urls):
+            data_uri = _to_data_uri_cached(url)
+            if not data_uri:
+                return {}  # download failed, caller falls back to single
+            content_parts.append({"type": "text", "text": f"\n--- Image {i} ---"})
+            content_parts.append({"type": "image_url", "image_url": {"url": data_uri}})
+
+        resp = requests.post(
+            "https://api.moonshot.cn/v1/chat/completions",
+            headers={"Authorization": f"Bearer {kimi_key}"},
+            json={
+                "model": "moonshot-v1-8k-vision-preview",
+                "messages": [{"role": "user", "content": content_parts}],
+                "max_tokens": 2000,
+            },
+            timeout=timeout,
+        )
+        text = resp.json()["choices"][0]["message"]["content"]
+        # Parse JSON array
+        m = re.search(r"\[.*\]", text, re.DOTALL)
+        if m:
+            items = json.loads(m.group(0))
+            result = {}
+            for item in items:
+                idx = item.get("result", -1)
+                if 0 <= idx < len(urls):
+                    result[urls[idx]] = item
+            return result
+    except Exception:
+        pass
+    return {}  # batch failed — caller falls back to single-image audit
+
+def _ensure_cache_dir() -> Path:
+    global _IMG_CACHE_DIR
+    if _IMG_CACHE_DIR is None:
+        _IMG_CACHE_DIR = Path(__file__).resolve().parent.parent / "_img_cache"
+        _IMG_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return _IMG_CACHE_DIR
+
 def _to_data_uri(url: str, max_retries: int = 3, timeout: int = 30) -> str | None:
     """Download image and return base64 data URI (for gw.alicdn that blocks API fetch).
     Retries with different User-Agent on failure."""
@@ -417,7 +474,6 @@ def _to_data_uri(url: str, max_retries: int = 3, timeout: int = 30) -> str | Non
             r = requests.get(url, **kwargs)
             if r.status_code == 200:
                 return f"data:image/jpeg;base64,{base64.b64encode(r.content).decode()}"
-            # 403/429 → retry with different UA
             if r.status_code in (403, 429):
                 time.sleep(0.5 * (attempt + 1))
                 continue
@@ -426,6 +482,23 @@ def _to_data_uri(url: str, max_retries: int = 3, timeout: int = 30) -> str | Non
             if attempt < max_retries - 1:
                 time.sleep(0.5 * (attempt + 1))
     return None
+
+def _to_data_uri_cached(url: str, max_retries: int = 3, timeout: int = 30) -> str | None:
+    """Download image to base64, caching to _img_cache/ by URL hash.
+    Cached entries are immutable — once cached, never re-download."""
+    cache_file = _ensure_cache_dir() / f"{hashlib.md5(url.encode()).hexdigest()}.b64"
+    if cache_file.exists():
+        try:
+            return cache_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            cache_file.unlink(missing_ok=True)
+    data_uri = _to_data_uri(url, max_retries, timeout)
+    if data_uri:
+        try:
+            cache_file.write_text(data_uri, encoding="utf-8")
+        except OSError:
+            pass
+    return data_uri
 
 
 def nano_gen(url: str, key: str, size: str = "4K", timeout: int = 300) -> str | None:
@@ -644,13 +717,47 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
     all_urls = list(unique_urls.keys())
     print(f"   {len(all_urls)} unique images across {len(w['rows'])} rows", flush=True)
 
-    # Step 2: Vision audit (parallel — cluster-like)
-    print(f"[2/5] Vision audit ({audit_workers} parallel)...", flush=True)
+    # Step 2: Vision audit (batch mode for Kimi, parallel for others)
+    print(f"[2/5] Vision audit (batch mode)...", flush=True)
     audits: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=audit_workers) as ex:
-        fut = {ex.submit(vision_audit, url, agnes_key, 60, ark_key, kimi_key, bailian_key): url for url in all_urls}
-        for f in as_completed(fut):
-            audits[fut[f]] = f.result()
+
+    if kimi_key:
+        # Batch audit: 4 images per Kimi API call, parallel batches
+        batches = [all_urls[i:i + BATCH_SIZE] for i in range(0, len(all_urls), BATCH_SIZE)]
+        print(f"   {len(batches)} batches of up to {BATCH_SIZE} images via Kimi...", flush=True)
+        _audit_lock = threading.Lock()
+        _audit_done = 0
+
+        def _audit_batch(urls_batch: list[str]) -> None:
+            nonlocal _audit_done
+            batch_result = vision_audit_batch(urls_batch, kimi_key=kimi_key)
+            with _audit_lock:
+                if batch_result:
+                    audits.update(batch_result)
+                    _audit_done += len(batch_result)
+                else:
+                    _audit_done += 0  # no partial count
+            # Fall back to single-audit for any URLs not returned
+            for url in urls_batch:
+                if url not in audits:
+                    single = vision_audit(url, agnes_key, 60, ark_key, kimi_key, bailian_key)
+                    with _audit_lock:
+                        audits[url] = single
+                        _audit_done += 1
+
+        with ThreadPoolExecutor(max_workers=min(8, len(batches))) as ex:
+            fut = {ex.submit(_audit_batch, b): i for i, b in enumerate(batches)}
+            _batch_start = time.monotonic()
+            for f in as_completed(fut):
+                f.result()  # propagate exceptions
+                elapsed = time.monotonic() - _batch_start
+                done = sum(1 for ff in fut if ff.done())
+                _print_progress(done, len(batches), elapsed, "audit")
+    else:
+        with ThreadPoolExecutor(max_workers=audit_workers) as ex:
+            fut = {ex.submit(vision_audit, url, agnes_key, 60, ark_key, "", bailian_key): url for url in all_urls}
+            for f in as_completed(fut):
+                audits[fut[f]] = f.result()
 
     # Write weight/dimensions extracted by vision audit back into work.json images
     for row in w["rows"]:

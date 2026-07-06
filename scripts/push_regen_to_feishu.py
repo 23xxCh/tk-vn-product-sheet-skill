@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -140,14 +141,82 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--include-skus", action="store_true",
                     help="Also write SKU and column for tracking (requires SKU/列 fields)")
     ap.add_argument("--as", dest="as_identity", default="user", choices=["user", "bot"])
+    ap.add_argument("--auto-finalize", action="store_true",
+                    help="Poll Feishu until images ready, then auto pull-regen + finalize")
+    ap.add_argument("--input-xlsx", help="Original xlsx to finalize (required with --auto-finalize)")
+    ap.add_argument("--output-xlsx", help="Output xlsx (default: <input>_processed.xlsx)")
+    ap.add_argument("--poll-interval", type=int, default=10,
+                    help="Seconds between poll checks (default: 10)")
+    ap.add_argument("--poll-timeout", type=int, default=600,
+                    help="Max seconds to wait for Feishu (default: 600)")
     args = ap.parse_args(argv)
 
     report = push_to_feishu(
         args.work_json, args.base_token, args.table_id,
         args.field, args.include_skus, args.as_identity,
     )
+    if report.get("pushed", 0) == 0:
+        return 1
+
+    # Auto-poll and finalize
+    if args.auto_finalize:
+        if not args.input_xlsx:
+            print("ERROR: --auto-finalize requires --input-xlsx", flush=True)
+            return 1
+        import importlib
+        pull_mod = importlib.import_module("pull_regen_from_feishu")
+        rp_mod = importlib.import_module("run_pipeline")
+
+        print(f"\n[auto] Polling Feishu every {args.poll_interval}s (timeout {args.poll_timeout}s)...",
+              flush=True)
+        total = report["pushed"]
+        elapsed = 0
+        while elapsed < args.poll_timeout:
+            time.sleep(args.poll_interval)
+            elapsed += args.poll_interval
+            ready = _count_ready(args.base_token, args.table_id, args.as_identity)
+            print(f"  {ready}/{total} ready (elapsed {elapsed}s)", flush=True)
+            if ready >= total:
+                print("[auto] All images ready! Pulling results...", flush=True)
+                pull_stats = pull_mod.update_work_json(
+                    args.work_json,
+                    pull_mod.fetch_records(args.base_token, args.table_id,
+                                           args.field, "图片转链接", args.as_identity)
+                )
+                print(f"  Matched: {pull_stats['matched']}, Unmatched: {pull_stats['unmatched']}",
+                      flush=True)
+                out_xlsx = args.output_xlsx or str(Path(args.input_xlsx).with_name(
+                    Path(args.input_xlsx).stem + "_processed.xlsx"))
+                rp_mod.finalize(args.input_xlsx, args.work_json, out_xlsx)
+                print(f"\n[auto] Done! -> {out_xlsx}", flush=True)
+                return 0
+        print(f"[auto] Timeout after {args.poll_timeout}s. Run pull-regen + finalize manually.",
+              flush=True)
+        return 1
+
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    return 0 if report.get("pushed", 0) > 0 else 1
+    return 0
+
+
+def _count_ready(base_token: str, table_id: str, as_identity: str = "user") -> int:
+    """Count how many records have 图片转链接 field filled."""
+    lark_cli = shutil.which("lark-cli") or "lark-cli"
+    cmd = [
+        lark_cli, "base", "+record-search",
+        "--base-token", base_token, "--table-id", table_id,
+        "--as", as_identity,
+        "--keyword", "http", "--search-field", "附件链接",
+        "--field-id", "图片转链接",
+        "--limit", "200", "--format", "json",
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=15)
+        d = json.loads(result.stdout).get("data", {})
+        rows = d.get("data", [])
+        return sum(1 for r in rows if len(r) > 0 and isinstance(r[0], str) and r[0])
+    except Exception:
+        return 0
 
 
 if __name__ == "__main__":

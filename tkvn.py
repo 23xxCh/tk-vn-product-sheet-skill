@@ -107,6 +107,16 @@ def cmd_push_regen(args: argparse.Namespace) -> int:
     if args.include_skus:
         argv += ["--include-skus"]
     argv += ["--as", args.as_identity]
+    if getattr(args, 'auto_finalize', False):
+        argv += ["--auto-finalize"]
+        if getattr(args, 'input_xlsx', None):
+            argv += ["--input-xlsx", args.input_xlsx]
+        if getattr(args, 'output_xlsx', None):
+            argv += ["--output-xlsx", args.output_xlsx]
+        if getattr(args, 'poll_interval', 10) != 10:
+            argv += ["--poll-interval", str(args.poll_interval)]
+        if getattr(args, 'poll_timeout', 600) != 600:
+            argv += ["--poll-timeout", str(args.poll_timeout)]
     return mod.main(argv)
 
 
@@ -197,6 +207,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--field", default="附件链接", help="接收URL的字段名 (默认: 附件链接)")
     p.add_argument("--include-skus", action="store_true", help="同时写入 SKU 和列信息")
     p.add_argument("--as", dest="as_identity", default="user", choices=["user", "bot"])
+    p.add_argument("--auto-finalize", action="store_true",
+                   help="自动轮询飞书→pull→finalize(一条命令到底)")
+    p.add_argument("--input-xlsx", help="原始 xlsx（配合 --auto-finalize 使用）")
+    p.add_argument("--output-xlsx", help="输出 xlsx（配合 --auto-finalize 使用）")
+    p.add_argument("--poll-interval", type=int, default=10)
+    p.add_argument("--poll-timeout", type=int, default=600)
     p.set_defaults(fn=cmd_push_regen)
 
     # pull-regen
