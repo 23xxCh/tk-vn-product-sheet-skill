@@ -159,13 +159,10 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
         # --- image decisions ---
         desc_delete: set[str] = set()
         desc_replace: dict[str, str] = {}
-        collected_weight = None
         for img in row["images"]:
             dec = (img.get("decision") or "").lower()
             orig = img["orig"]
             new_url = img.get("new_url") or ""
-            if img.get("weight_kg") is not None:
-                collected_weight = img["weight_kg"]
 
             if dec == "keep":
                 continue
@@ -193,9 +190,7 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
             vi_text = sheet_io.extract_text_content(cur_html)
         ws.cell(row=r, column=desc_ci).value = sheet_io.build_description_all(vi_text, new_urls)
 
-        # physical attrs
-        if collected_weight is not None:
-            ws.cell(row=r, column=sheet_io.col_idx(COL["weight"])).value = round(float(collected_weight), 3)
+        # physical attrs (weight extraction disabled - unreliable)
 
     # --- column cleanup: 删「本地展示价」空列 + 「价格(站点币种)」改名「本地展示价」 ---
     # 按标题定位,不硬编码列号(先删空列可能改变列号,所以先找再删)
@@ -224,6 +219,22 @@ def finalize(xlsx_path: str, work_json: str, out_xlsx: str) -> None:
     # 「价格(站点币种)」标题改名为「本地展示价」
     if price_col:
         ws.cell(row=header_row, column=price_col).value = "本地展示价"
+
+    # Clean weight column: 0, non-numeric → None; strings → float
+    if COL.get("weight"):
+        w_ci = sheet_io.col_idx(COL["weight"])
+        for r in range(2, ws.max_row + 1):
+            v = ws.cell(row=r, column=w_ci).value
+            if v is None or v == "":
+                continue
+            try:
+                fv = float(v)
+                if fv == 0.0:
+                    ws.cell(row=r, column=w_ci).value = None
+                elif isinstance(v, str):
+                    ws.cell(row=r, column=w_ci).value = fv  # string→float
+            except (ValueError, TypeError):
+                ws.cell(row=r, column=w_ci).value = None
 
     if Path(out_xlsx).resolve() == Path(xlsx_path).resolve():
         bak = Path(xlsx_path).with_suffix(Path(xlsx_path).suffix + ".bak")
