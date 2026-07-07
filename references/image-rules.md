@@ -84,6 +84,9 @@ Delete any image whose content is primarily one of these (not the product):
 - 店铺关注 / 关注领券 / 收藏有礼
 - 物流时效 / 发货说明
 - 节日活动 (双11, 618, 年货节) posters
+- **纯色底图** — 全白/全红/全灰等纯色背景且无产品图（has_solid_color_bg=true）
+- **纯图标** — 只有箭头、勾号、星号等图标，无产品（has_pure_icon=true）
+- **无关文字图** — 文字内容与产品规格无关，如"谢谢购买"、"好评返现"、"关注店铺"（has_irrelevant_text=true）
 - Pure text "spec table" with no product — actually keep & translate these
   (they carry weight/dimension info); only delete if it's marketing copy.
 
