@@ -148,7 +148,14 @@ def normalize_url(url: str | None) -> str:
 def extract_img_urls(html: str | None) -> list[str]:
     if not html:
         return []
-    return [normalize_url(unescape(m)) for m in IMG_SRC_RE.findall(html)]
+    seen: set[str] = set()
+    urls: list[str] = []
+    for m in IMG_SRC_RE.findall(html):
+        u = normalize_url(unescape(m))
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
+    return urls
 
 
 def build_description_html(urls: list[str]) -> str:
