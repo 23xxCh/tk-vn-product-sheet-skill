@@ -974,14 +974,11 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
 
     # Multi-key gen pipeline with retry
     def gen_one(url: str) -> tuple[str, str | None]:
-        # edits → nano-banana-2 → Doubao → GPT generations
+        # edits → nano-banana-2 → GPT generations (Doubao removed)
         r = _try_key_chain(lambda: edit_gen(url, rr_edits.next_key() or hfsy_key))
         if r:
             return url, r
         r = _try_key_chain(lambda: nano_gen(url, rr_nano.next_key() or hfsy_key, size=gen_size))
-        if r:
-            return url, r
-        r = _try_key_chain(lambda: doubao_gen(url, rr_doubao.next_key() or ark_key))
         if r:
             return url, r
         r = _try_key_chain(lambda: hfsyapi_gen(url, rr_hfsyapi.next_key() or hfsy_key))
@@ -1017,7 +1014,7 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
         # Reset key RRs for fresh key rotation
         rr_edits = KeyRoundRobin(hfsy_keys) if hfsy_keys else None
         rr_nano = KeyRoundRobin(hfsy_keys) if hfsy_keys else None
-        rr_doubao = KeyRoundRobin(ark_keys) if ark_keys else None
+        # Doubao removed from gen chain (keep for translation/vision only)
         rr_hfsyapi = KeyRoundRobin(hfsy_keys) if hfsy_keys else None
         print(f"   Retry round {retry_round}/{max_retries}: {len(failed_urls)} failed images...", flush=True)
         time.sleep(3)  # brief pause before retry
