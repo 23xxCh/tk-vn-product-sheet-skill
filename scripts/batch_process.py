@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_pipeline  # noqa: E402
 from run_pipeline import prepare as rp_prepare, finalize as rp_finalize
 
-PROMPT = "Remove brand names, logos and watermarks from the image, and translate all text to Vietnamese."
+PROMPT = "Remove brand names, logos and watermarks from the image. Do NOT translate any text."
 
 AUDIT_SYSTEM = (
     "Audit product image for brand/logo/watermark ONLY. Output JSON only: "
@@ -705,7 +705,8 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
                  _checkpoint_path: str | None = None,
                  _no_gen: bool = False,
                  kimi_key: str = "",
-                 bailian_key: str = "") -> dict[str, Any]:
+                 bailian_key: str = "",
+                 _no_translate: bool = False) -> dict[str, Any]:
     xlsx = Path(xlsx_path).resolve()
     work = Path(work_path or xlsx.with_name("work_auto.json")).resolve()
 
@@ -766,7 +767,8 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
 
     # Translation: Kimi (if available) or ark_keys (minimax-m3)
     # Uses cache to avoid re-translating identical text across rows
-    if kimi_key or ark_keys:
+    # _no_translate=True skips all translation (brand/logo/watermark only mode)
+    if (kimi_key or ark_keys) and not _no_translate:
         _rr_trans = KeyRoundRobin(ark_keys)
         _trans_lock = threading.Lock()
         _trans_cache: dict[str, dict] = {}  # dedup identical texts
@@ -1109,6 +1111,8 @@ def main(argv: list[str]) -> int:
                     help="Checkpoint file path for resume support")
     ap.add_argument("--no-gen", action="store_true",
                     help="Skip local image gen, output work.json for external processing (e.g. Feishu)")
+    ap.add_argument("--no-translate", action="store_true",
+                    help="Skip translation (brand/logo/watermark only mode)")
     args = ap.parse_args(argv)
 
     # Parse multi-key support
@@ -1141,6 +1145,7 @@ def main(argv: list[str]) -> int:
         _no_gen=args.no_gen,
         kimi_key=args.kimi_key,
         bailian_key=args.bailian_key,
+        _no_translate=args.no_translate,
     )
     print("\n=== Summary ===", flush=True)
     for k, v in report.items():
