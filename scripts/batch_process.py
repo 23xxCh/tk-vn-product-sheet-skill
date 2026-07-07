@@ -41,25 +41,17 @@ from run_pipeline import prepare as rp_prepare, finalize as rp_finalize
 PROMPT = "Remove brand names, logos and watermarks from the image, and translate all text to Vietnamese."
 
 AUDIT_SYSTEM = (
-    "Audit product image. Output JSON only: "
+    "Audit product image for brand/logo/watermark ONLY. Output JSON only: "
     '{"has_brand_name":bool,"brand_names_found":[],"has_logo":bool,'
-    '"has_watermark":bool,"has_chinese_text":bool,"has_text":bool,"text_type":"english|chinese|mixed|none",'
-    '"is_promo_banner":bool,"has_solid_color_bg":bool,"has_pure_icon":bool,"has_irrelevant_text":bool,'
-    '"is_product_relevant":bool,'
-    '"needs_cleaning":bool,"cleaning_reason":"relevant|brand|logo|watermark|text|promo|solid_bg|icon|irrelevant_text|none"}'
+    '"has_watermark":bool,"needs_cleaning":bool,"cleaning_reason":"brand|logo|watermark|none",'
     "\n检查要求(必须非常仔细):"
     "\n1. 品牌名: 检查图片所有区域(主图、角落、底部、文字内)是否有任何品牌名,包括IWC/Nike/Adidas/BMW/苹果/HUAWEI/小米/三星/优衣库/ZARA/HM等所有知名/不知名品牌,英文/中文/拼音都算。发现则列出在brand_names_found。"
-    "\n2. Logo: 检查是否有任何logo图标(品牌logo、官方标识、产品logo),包括角落小logo、半透明水印式logo、底色上的产品logo。"
+    "\n2. Logo: 检查是否有任何logo图标(品牌logo、官方标识、产品logo),包括角落小logo、半透明水印式logo、背景上的产品logo。"
     "\n3. 水印: 检查是否有任何水印(图片水印、半透明文字、版权标记、防盗水印),包括角落、边缘、背景层。"
-    "\n4. 文字: 检查图中任何文字(中文/英文),包括产品参数、规格、广告语。has_text=true if any text visible。"
-    "\n5. 促销banner: 客服/售后/优惠/优惠券/物流说明图。is_promo_banner=true if not product photo。"
-    "\n6. 纯色底图: 是否纯色背景且无产品(has_solid_color_bg=true)?例如全白/全红背景且无产品图。"
-    "\n7. 纯图标: 是否只有图标无产品(has_pure_icon=true)?例如箭头、勾号、星号等图标。"
-    "\n8. 无关文字: 是否有与产品规格无关的文字(has_irrelevant_text=true)?例如'谢谢购买'、'好评返现'、'关注店铺'等。"
-    "\n9. 产品相关性: 总体判断图片是否适合产品刊登(is_product_relevant)。has_solid_color_bg/has_pure_icon/has_irrelevant_text任一true → is_product_relevant=false。"
-    "\n任何has_brand_name/has_logo/has_watermark/has_text=true → needs_cleaning=true,reason=对应类型。"
-    "\n描述列图片有文字也一律needs_cleaning=true(需翻译越南语)。"
-    "\n输出不得残留任何中文字符。如果原文包含中文,必须全部翻译成越南语。"
+    "\n重要: 不需要检查文字。只有纯文字没有品牌名/logo/水印图片 → needs_cleaning=false。"
+    "\n任何has_brand_name/has_logo/has_watermark=true → needs_cleaning=true,reason=对应类型。"
+    "\n不需要检查: 文字、促销banner、纯色底图、纯图标、产品相关性。"
+    "\n如果图片只有文字没有品牌/logo/水印 → needs_cleaning=false(直接keep)。"
 )
 
 # 批量翻译的 system prompt (标题/变种/描述文字一次性翻译, 去品牌+越南语)
@@ -896,16 +888,15 @@ def auto_process(xlsx_path: str, ark_key: str, hfsy_key: str, agnes_key: str,
         if source == "desc" and url and _is_promo_url(url):
             return "delete"
         needs_clean = (a.get("needs_cleaning") or a.get("has_brand_name")
-                       or a.get("has_logo") or a.get("has_watermark")
-                       or a.get("has_chinese_text") or a.get("has_text"))
+                       or a.get("has_logo") or a.get("has_watermark"))
         if source == "desc":
             if a.get("is_promo_banner"):
                 return "delete"
             # For description images: delete irrelevant types (solid bg, pure icon, irrelevant text)
             if a.get("has_solid_color_bg") or a.get("has_pure_icon") or a.get("has_irrelevant_text"):
                 return "delete"
-            # For description images: any text needs Vietnamese translation
-            if a.get("has_text") or a.get("has_chinese_text"):
+            # For description images: brand/logo/watermark need regen (text NOT checked)
+            if needs_clean:
                 return "regen"
             return "regen" if needs_clean else "keep"
         else:
