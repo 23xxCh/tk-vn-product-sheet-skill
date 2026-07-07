@@ -1,173 +1,113 @@
+---
+name: tk-vn-product-sheet-skill
+description: Process TikTok China product sheets for TikTok Vietnam. Use when processing xlsx files from taobao/1688 for TikTok Shop Vietnam listing. Triggers: "处理表格", "越南站", "TikTok越南", "清洗商品数据", "翻译越南语"
+---
+
 # TK VN Product Sheet Skill
 
-处理中国来源的 TikTok 商品表格，自动生成越南站可用的刊登表格。
+## Workflow
 
-CLI 统一入口：`python tkvn.py <command>`
+### Step 1: Local Audit (确定性)
+- Run vision audit on all unique images using 4-layer fallback chain
+- **Completion**: work.json created with audit results for all images
+- **Freedom**: Low — exact prompt, exact fallback order
 
-## 两种工作流
+### Step 2: Translation (确定性)
+- Translate titles, variants, descriptions using 2-layer fallback
+- **Completion**: all translatable fields filled in work.json, ≤80 chars for titles
+- **Freedom**: Medium — follow vietnamese-style.md rules, but prompt wording flexible
 
-### 飞书生图模式（推荐，稳定）
+### Step 3: Deterministic Cleaning (确定性)
+- Brand → empty, Stock → 30, SKU → YYYYMMDD00001, Video → delete
+- Image URLs → https, Price column → rename to 本地展示价 (drop empty column)
+- **Completion**: work.json updated with all deterministic values
+- **Freedom**: Low — exact values, exact order
 
-本地做确定性清洗+翻译+审计，生图委托飞书 AI 字段捷径：
+### Step 4: Image Generation (灵活性)
+- **Option A**: Local generation (全自动, use --hfsy-key)
+- **Option B**: Feishu AI (推荐, use push-regen + pull-regen)
+- **Completion**: work.json updated with generated URLs or keep decisions
+- **Freedom**: High — user chooses local vs Feishu
+
+### Step 5: Write Back (确定性)
+- Run finalize to write work.json back to xlsx
+- **Completion**: output.xlsx created with all changes applied, no column misalignment
+- **Freedom**: Low — exact command, exact order
+
+## Error Handling
+
+| Error | Action |
+|-------|--------|
+| API rate limit (429) | Retry with exponential backoff (max 3 attempts) |
+| Network timeout | Retry with backoff |
+| Vision audit fails all models | Mark as needs_cleaning (conservative) |
+| Translation fails | Keep original text, flag in report |
+| Excel locked | Retry save 10 times, then save with _final suffix |
+| Feishu polling timeout | Manual finalize after user confirms completion |
+| Image download fails | Retry with different User-Agent/Referer, then skip |
+
+## Gotchas
+
+- **列错位**: Deleting empty columns shifts column positions. Always delete BEFORE writing data, then re-resolve columns.
+- **base64 cache**: Signed URLs (Expires=) should not be cached — they expire and mask refreshed URLs.
+- **Translation race**: Multiple threads translating same text can produce different results. Use field-level cache + lock.
+- **work.json overwrite**: Re-running process overwrites work.json. Use --checkpoint to resume, or delete work.json first.
+- **Image URL expiration**: OSS signed URLs expire in ~24 hours. Process immediately.
+- **gw.alicdn.com firewall**: Use multiple User-Agent/Referer + retry for downloads.
+- **Delete rule**: Only delete C column (description) images. Never delete R/S-Z/AC images.
+- **Field name hardcoded**: _count_ready checks for "图片转链接". Use --new-field to customize.
+- **Weight/dimension extraction**: Disabled due to unreliable data from vision models.
+- **Chinese character residue**: Translation prompt may leave Chinese chars. Post-process to strip.
+- **Promo image detection**: URL patterns (paybtn, kefu, coupon) mark as delete. Vision audit may miss some.
+- **Multi-key rotation**: Comma-separated keys rotate per request. If one key fails, next request uses next key.
+
+## References
+
+- Translation rules: [references/vietnamese-style.md](references/vietnamese-style.md)
+- Image audit rules: [references/image-rules.md](references/image-rules.md)
+- Field mapping: [references/field-mapping.md](references/field-mapping.md)
+- Feishu AI shortcuts: [references/feishu-ai-field-shortcuts.md](references/feishu-ai-field-shortcuts.md)
+
+## CLI Commands
 
 ```bash
-# 1. 本地处理（审计+翻译，不生图）
-python tkvn.py process "input.xlsx" --kimi-key $KIMI_API_KEY --no-gen
+# Full pipeline (local generation)
+python tkvn.py process "input.xlsx" --kimi-key KEY --hfsy-key "K1,K2" --gen-size 4K
 
-# 2. 推送需重新生成的图片URL到飞书
-python tkvn.py push-regen work_auto.json \
-  --base-token <token> --table-id <table>
+# Local audit + translation only
+python tkvn.py process "input.xlsx" --kimi-key KEY --no-gen
 
-# 3. 在飞书 Web UI 配置 AI 字段捷径处理图片后
+# Feishu workflow (recommended)
+python tkvn.py push-regen work.json -t TOKEN -i TABLE
+python tkvn.py pull-regen work.json -t TOKEN -i TABLE
+python tkvn.py finalize "input.xlsx" work.json "output.xlsx"
 
-# 4. 拉取飞书处理后的新URL
-python tkvn.py pull-regen work_auto.json \
-  --base-token <token> --table-id <table>
-
-# 5. 写回 xlsx
-python tkvn.py finalize "input.xlsx" work_auto.json "output.xlsx"
-```
-
-### 本地生图模式（全自动）
-
-一条命令完成全部流程：
-
-```bash
-python tkvn.py process "input.xlsx" \
-  --kimi-key $KIMI_API_KEY \
-  --hfsy-key "key1,key2,key3" \
-  --gen-size 4K --workers 50
-```
-
-## CLI 命令速查
-
-```bash
-# 全自动流水线（本地生图）
-python tkvn.py process "input.xlsx"
-  --kimi-key KEY          # Kimi 视觉审计 + 翻译（首选）
-  --bailian-key KEY        # 阿里云百炼 Qwen-VL（备用）
-  --hfsy-key "K1,K2"       # 生图 API keys，逗号分隔多key轮换
-  --doubao-key KEY         # minimax-m3 + 豆包生图
-  --agnes-key KEY          # agnes-2.0-flash 视觉审计备用
-  --no-gen                 # 跳过本地生图，仅输出 work.json
-  --workers N              # 生图并发数（0=自动）
-  --checkpoint PATH        # 断点续传文件路径
-  --gen-size 4K            # 生图分辨率 [1K|2K|4K]
-
-# 分步模式
-python tkvn.py prepare "input.xlsx"     # 仅确定性清洗
-python tkvn.py finalize "input.xlsx" work.json "out.xlsx"  # 写回
-
-# 飞书生图子命令
-python tkvn.py push-regen work.json -t <token> -i <table>   # 推送URL到飞书
-python tkvn.py pull-regen work.json -t <token> -i <table>   # 拉取新URL
-
-# 校验
+# Verification
 python tkvn.py check "output.xlsx" brand_set
 python tkvn.py check "output.xlsx" sku_format
-
-# 评测
 python tkvn.py eval
 
-# 文件夹监听
-python tkvn.py watch
+# Utilities
+python tkvn.py rollback "output.xlsx"  # Restore from .bak
+python tkvn.py watch  # Folder watcher mode
 ```
 
-## 环境变量
+## Environment Variables
 
 ```bash
-KIMI_API_KEY=xxx      # Kimi/Moonshot（视觉审计+翻译首选）
-BAILIAN_API_KEY=xxx    # 阿里云百炼 Qwen-VL（视觉审计备用，支持URL直传）
-ARK_API_KEY=xxx        # Volcengine（minimax-m3翻译+豆包生图）
-HFSY_API_KEY=xxx       # hfsyapi（nano-banana-2/GPT-Image-2生图），支持逗号分隔多key
-AGNES_API_KEY=xxx      # agnes-2.0-flash（视觉审计最后备用）
+KIMI_API_KEY=xxx      # Vision audit + translation (primary)
+BAILIAN_API_KEY=xxx   # Vision audit (backup, supports URL direct)
+ARK_API_KEY=xxx       # Translation (backup)
+HFSY_API_KEY=xxx      # Image generation (comma-separated for rotation)
+AGNES_API_KEY=xxx     # Vision audit (last resort)
 ```
 
-## 视觉审计（4层回退链）
+## Determinism Guarantees
 
-| 优先级 | 模型 | 端点 | 传图方式 |
-|--------|------|------|---------|
-| 1 | Kimi moonshot-v1-8k-vision | api.moonshot.cn | base64 |
-| 2 | 阿里云百炼 qwen-vl-plus | dashscope.aliyuncs.com | URL→base64 |
-| 3 | minimax-m3 | Volcengine | URL直传 |
-| 4 | agnes-2.0-flash | apihub.agnes-ai.com | URL直传 |
-
-审计输出字段：`has_brand_name`, `has_logo`, `has_watermark`, `has_chinese_text`, **`has_text`**（所有文字含英文）, `text_type`, `is_promo_banner`, `needs_cleaning`, `weight_kg`, `length_cm`, `width_cm`, `height_cm`
-
-## 翻译（2层回退）
-
-1. Kimi moonshot-v1-8k（越南语翻译专家 prompt）
-2. minimax-m3 via Volcengine
-
-翻译内容：标题(B)、变种属性名(G/I/K)、变种属性值(H/J/L)、描述文字(C)。
-
-规则见 `references/vietnamese-style.md`：品类名词开头 ≤80 字符、品牌词改 `phù hợp với`、删原装/原厂。
-
-## 确定性清洗规则
-
-- 品牌 → 留空
-- 库存 → 30
-- SKU → `YYYYMMDD00001`
-- 视频 → 删除
-- 图片 URL → 统一 https
-- 价格列 → 改名「本地展示价」（只删空列）
-- 列映射 → 根据列头名称动态定位，兼容不同 TikTok 导出格式
-
-## 图像分类规则
-
-**描述列（C）图片：**
-- URL 模式匹配促销/服务图 → `delete`（paybtn, kefu, coupon, ibay365, itemtplimg 等）
-- 视觉审计 `is_promo_banner: true` → `delete`
-- 有品牌/logo/水印/文字（中/英） → `regen`（翻译越南语+去品牌）
-- 干净产品图 → `keep`
-
-**主图/附图/变种图：绝不删除，只 regen 或 keep**
-
-## 生图回退链
-
-多 key 轮换 + 全局重试池（失败自动重试 2 轮）：
-
-`edits (gpt-image-2) → nano-banana-2(4K) → 豆包 seedream(2K) → GPT generations(1K)`
-
-## 飞书表格字段
-
-表格需配置字段和 AI 字段捷径：
-
-| 字段 | 类型 | 作用 |
-|------|------|------|
-| 附件链接 | text | 接收原始图片 URL |
-| 链接转附件 | attachment | AI：URL→附件 |
-| 生成图片 | attachment | AI：清洗+翻译 |
-| 图片转链接 | text | AI：附件→URL（拉取用） |
-
-## 硬性约束
-
-- `delete` 仅对 C 列（描述）图片生效。主图/附图/变种图绝不删除。
-- 不同 TikTok 导出表格列顺序可能不同，代码根据列头名称动态定位。
-- 图片 URL 约 24 小时过期（OSS 签名），需尽快处理。
-- `gw.alicdn.com` 图片防盗链，需多 UA/Referer 重试下载转 base64。
-- Excel 锁：`wb.save()` 等 10 次重试，失败存 `_final` 后缀文件。
-
-## 其他命令
-
-```bash
-python tkvn.py rollback "表格.xlsx"     # 从.bak恢复（撤销finalize）
-```
-
-## 评测
-
-```bash
-python tkvn.py eval
-```
-
-黄金用例在 `evals/` 目录下（case1-5）。
-
-## 确定性保证
-
-- **审计缓存** `_audit_cache.json` — 同一URL永远返回同一结果
-- **翻译缓存** `_trans_cache` — 同一文本永远返回同一译文  
-- **base64缓存** `_img_cache/` — 下载过的图不再重下
-- **work.json resume** — 重新process自动复用上次审计翻译结果
-- **已处理图跳过** — hfsyapi/coze/~crop URL 直接keep
-- **URL模式检测** — 促销图/paybtn/service 正则直接delete
-
+- **Audit cache**: `_audit_cache.json` — same URL always returns same audit result
+- **Translation cache**: `_trans_cache` — same text always returns same translation (field-level)
+- **base64 cache**: `_img_cache/` — downloaded images cached locally (signed URLs excluded)
+- **work.json resume**: Re-running process resumes from work.json (uses cached results)
+- **Already-processed skip**: hfsyapi/coze/~crop URLs marked as keep without re-audit
+- **URL pattern detection**: Promo/service URLs matched by regex, marked as delete
+- **Exception classification**: 401/403/404 → no retry; 429/5xx → retry; timeout → retry
